@@ -23,7 +23,7 @@ pipeline {
 
         // --- ODOO LOCAL (Para reportar estado) ---
         // Nota: Asegúrate que el puerto 8079 es correcto. Normalmente es 8069.
-        ODOO_LOCAL_URL = "http://localhost:8079"
+        ODOO_LOCAL_URL = "https://faceable-maddison-unharangued.ngrok-free.dev"
         ODOO_LOCAL_DB = "prueba"
         ODOO_LOCAL_PASS = credentials('odoo-local-api-key') 
     }
@@ -163,7 +163,7 @@ pipeline {
                 script {
                     // 1. Google Chat
                     def chat_msg = """
-                        {"text": "✅ *Respaldo Completado*\\n*Base:* ${env.NEW_DB_NAME}\\n*Tipo:* ${params.BACKUP_TYPE}\\n*Usuario:* ${params.EXECUTED_BY}\\n*URL:* ${env.FINAL_URL}"}
+                        {"text": "*Respaldo Completado*\\n*Base:* ${env.NEW_DB_NAME}\\n*Tipo:* ${params.BACKUP_TYPE}\\n*Usuario:* ${params.EXECUTED_BY}\\n*URL:* ${env.FINAL_URL}"}
                     """
                     sh """
                         curl -X POST -H 'Content-Type: application/json; charset=UTF-8' \
