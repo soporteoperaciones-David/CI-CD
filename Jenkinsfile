@@ -1,9 +1,8 @@
 pipeline {
     agent {
         docker {
-            // Usamos Ubuntu 22.04 limpio
             image 'ubuntu:22.04'
-            // Damos permisos de ROOT y de RED (Tun/Tap) para la VPN
+            // Permisos de root y red necesarios para la VPN
             args '-u root --privileged --cap-add=NET_ADMIN --device /dev/net/tun -v /var/run/docker.sock:/var/run/docker.sock'
         }
     }
@@ -17,35 +16,27 @@ pipeline {
     }
 
     environment {
-        // --- CREDENCIALES ---
-        // El archivo .ovpn subido a Jenkins (Secret File)
-        VPN_CONFIG = credentials('vpn-pasante-config')
+        // AHORA ESTO ES UN TEXTO SECRETO, NO UN ARCHIVO
+        VPN_CONTENT = credentials('vpn-pasante-config')
         
         ROOT_PASS_ID = 'root-password-prod' 
         GOOGLE_CHAT_WEBHOOK = credentials('GOOGLE_CHAT_WEBHOOK')
         
-        // --- DESTINOS ---
         IP_TEST_V15 = "148.113.165.227" 
         IP_TEST_V19 = "158.69.210.128"
         BACKUP_DIR_REMOTE = "/opt/backup_integralis"
 
-        // --- NGROK / LOCAL ---
-        // ¡VERIFICA QUE ESTA URL SIGA SIENDO LA CORRECTA DE NGROK!
-        ODOO_LOCAL_URL = "https://faceable-maddison-unharangued.ngrok-free.dev" 
+        ODOO_LOCAL_URL = "https://faceable-maddison-unharangued.ngrok-free.dev" // <--- ¡VERIFICA TU NGROK!
         ODOO_LOCAL_DB = "prueba"
         ODOO_LOCAL_PASS = credentials('odoo-local-api-key') 
     }
 
     stages {
-        stage('Preparar Entorno Docker') {
+        stage('Preparar Entorno') {
             steps {
                 script {
-                    echo "--- Instalando herramientas en el contenedor efímero ---"
-                    // Instalamos todo lo necesario de una sola vez
-                    sh """
-                        apt-get update
-                        apt-get install -y openvpn curl sshpass iputils-ping python3
-                    """
+                    echo "--- Instalando herramientas ---"
+                    sh "apt-get update && apt-get install -y openvpn curl sshpass iputils-ping python3"
                 }
             }
         }
@@ -53,20 +44,24 @@ pipeline {
         stage('Conectar VPN y Descargar') {
             steps {
                 script {
-                    echo "--- Iniciando VPN ---"
+                    echo "--- Configurando VPN ---"
                     
-                    // CORRECCIÓN AQUÍ: Agregamos comillas simples '' alrededor de la variable
-                    // para manejar rutas con espacios.
-                    sh "cp '${env.VPN_CONFIG}' /tmp/vpn_config.ovpn"
+                    // SOLUCIÓN AQUÍ: Escribimos el contenido del secreto directamente en un archivo nuevo
+                    // Usamos comillas dobles para que lea la variable, pero con cuidado.
+                    // Escribimos el contenido en /tmp/vpn_config.ovpn
+                    sh "echo \"$VPN_CONTENT\" > /tmp/vpn_config.ovpn"
+                    
+                    // Verificamos que el archivo se creó y tiene contenido (Debug)
+                    sh "ls -l /tmp/vpn_config.ovpn"
 
-                    // Iniciamos OpenVPN en background
+                    // Iniciamos OpenVPN
                     sh "openvpn --config /tmp/vpn_config.ovpn --daemon"
                     
                     echo "Esperando conexión..."
                     sleep 10
                     
-                    // Verificación de conexión (Opcional, no falla si no hay ping)
-                    sh "ping -c 2 10.8.0.1 || echo 'Ping falló, pero continuamos...'"
+                    // Prueba de vida
+                    sh "ping -c 2 10.8.0.1 || echo 'Ping falló, intentando continuar...'"
 
                     // --- LÓGICA DE CONTRASEÑA MAESTRA ---
                     if (params.ODOO_URL.contains('.sdb-integralis360.com')) {
@@ -111,13 +106,10 @@ pipeline {
         stage('Enviar y Restaurar') {
             steps {
                 script {
-                    // Calculamos versión Postgres
                     env.PG_BIN_VERSION = "17" 
                     if (params.ODOO_URL.contains('sdb-integralis360.com')) {
                         env.PG_BIN_VERSION = "12"
-                        if (env.DB_NAME.contains('edb') || env.DB_NAME.contains('cgs')) {
-                            env.PG_BIN_VERSION = "17"
-                        }
+                        if (env.DB_NAME.contains('edb') || env.DB_NAME.contains('cgs')) { env.PG_BIN_VERSION = "17" }
                     }
 
                     def target_ip = (params.VERSION == 'v15') ? env.IP_TEST_V15 : env.IP_TEST_V19
@@ -127,7 +119,6 @@ pipeline {
                     env.FINAL_URL = "https://${env.NEW_DB_NAME}.odooecuador.online/web/login"
 
                     withCredentials([string(credentialsId: env.ROOT_PASS_ID, variable: 'ROOT_PASS')]) {
-                        // Enviamos con sshpass (que instalamos en el primer stage)
                         echo "Enviando a ${target_ip}..."
                         sh "sshpass -p '${ROOT_PASS}' scp -o StrictHostKeyChecking=no ${env.BACKUP_FILE} root@${target_ip}:${env.BACKUP_DIR_REMOTE}/"
 
@@ -152,10 +143,10 @@ pipeline {
             }
         }
         
-        stage('Notificaciones') {
-             steps {
+        stage('Notificar') {
+            steps {
                 script {
-                    def chat_msg = """{"text": "*Respaldo Completado*\\n*Base:* ${env.NEW_DB_NAME}\\n*Tipo:* ${params.BACKUP_TYPE}\\n*URL:* ${env.FINAL_URL}"}"""
+                    def chat_msg = """{"text": "✅ *Respaldo Completado*\\n*Base:* ${env.NEW_DB_NAME}\\n*URL:* ${env.FINAL_URL}"}"""
                     sh "curl -X POST -H 'Content-Type: application/json; charset=UTF-8' -d '${chat_msg}' '${env.GOOGLE_CHAT_WEBHOOK}' || true"
 
                     def odoo_payload = """
@@ -166,11 +157,7 @@ pipeline {
                             "args": [
                                 "${env.ODOO_LOCAL_DB}", 2, "${env.ODOO_LOCAL_PASS}",
                                 "backup.automation", "write",
-                                [[${params.ODOO_ID}], {
-                                    "state": "done",
-                                    "result_url": "${env.FINAL_URL}",
-                                    "jenkins_log": "Exitoso. Base: ${env.NEW_DB_NAME}"
-                                }]
+                                [[${params.ODOO_ID}], {"state": "done", "result_url": "${env.FINAL_URL}", "jenkins_log": "Exito"}]
                             ]
                         }
                     }
@@ -188,7 +175,6 @@ pipeline {
         failure {
             script {
                 if (params.ODOO_ID) {
-                    def error_msg = "Fallo en Jenkins #${env.BUILD_NUMBER}. Ver logs: ${env.BUILD_URL}"
                     def err_payload = """
                     {
                         "jsonrpc": "2.0", "method": "call",
@@ -197,7 +183,7 @@ pipeline {
                             "args": [
                                 "${env.ODOO_LOCAL_DB}", 2, "${env.ODOO_LOCAL_PASS}",
                                 "backup.automation", "write",
-                                [[${params.ODOO_ID}], {"state": "error", "jenkins_log": "${error_msg}"}]
+                                [[${params.ODOO_ID}], {"state": "error", "jenkins_log": "Fallo en Jenkins"}]
                             ]
                         }
                     }
