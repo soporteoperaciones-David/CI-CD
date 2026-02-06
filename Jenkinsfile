@@ -2,8 +2,11 @@ pipeline {
     agent {
         docker {
             image 'ubuntu:22.04'
-            // Permisos necesarios para VPN
-            args '-u root --privileged --cap-add=NET_ADMIN --device /dev/net/tun -v /var/run/docker.sock:/var/run/docker.sock'
+            reuseNode true
+            // CAMBIO CLAVE AQUÍ ABAJO:
+            // Agregamos: -v /home/ubuntu/pasante.ovpn:/tmp/pasante.ovpn
+            // Esto conecta el archivo físico del servidor directo al contenedor en /tmp
+            args '-u root --privileged --cap-add=NET_ADMIN --device /dev/net/tun -v /var/run/docker.sock:/var/run/docker.sock -v /home/ubuntu/pasante.ovpn:/tmp/pasante.ovpn'
         }
     }
 
@@ -16,8 +19,7 @@ pipeline {
     }
 
     environment {
-        // Obtenemos el contenido del texto secreto
-        VPN_CONTENT = credentials('vpn-pasante-config')
+        // YA NO NECESITAMOS LA CREDENCIAL DE VPN AQUÍ
         
         ROOT_PASS_ID = 'root-password-prod' 
         GOOGLE_CHAT_WEBHOOK = credentials('GOOGLE_CHAT_WEBHOOK')
@@ -44,27 +46,22 @@ pipeline {
         stage('Conectar VPN y Descargar') {
             steps {
                 script {
-                    echo "--- Configurando VPN ---"
+                    echo "--- Iniciando VPN (Desde archivo montado) ---"
                     
-                    // CORRECCIÓN MAESTRA:
-                    // Usamos writeFile (Groovy) en vez de 'sh echo'.
-                    // Esto crea el archivo perfecto en el directorio de trabajo.
-                    writeFile file: 'pasante.ovpn', text: env.VPN_CONTENT
+                    // Como el archivo ya "apareció" mágicamente en /tmp/pasante.ovpn gracias al volumen
+                    // solo verificamos que esté ahí y lo usamos.
                     
-                    // Nos aseguramos de que sea legible (solo por si acaso)
-                    sh "chmod 600 pasante.ovpn"
-                    sh "ls -l pasante.ovpn"
-
-                    // Iniciamos OpenVPN usando el archivo local
-                    // Nota: --daemon hace que corra en background
-                    sh "openvpn --config pasante.ovpn --daemon"
+                    sh "ls -l /tmp/pasante.ovpn"
+                    
+                    // Iniciamos OpenVPN apuntando al archivo montado
+                    sh "openvpn --config /tmp/pasante.ovpn --daemon"
                     
                     echo "Esperando conexión..."
                     sleep 15
                     
-                    // Diagnóstico de red
-                    sh "ip addr show tun0 || echo '⚠️ La interfaz tun0 no aparece'"
-                    sh "ping -c 2 10.8.0.1 || echo '⚠️ Ping falló, pero intentamos continuar...'"
+                    // Diagnóstico
+                    sh "ip addr show tun0 || echo 'La interfaz tun0 no aparece'"
+                    sh "ping -c 2 10.8.0.1 || echo ' Ping falló, pero continuamos...'"
 
                     // --- LÓGICA DE CONTRASEÑA MAESTRA ---
                     if (params.ODOO_URL.contains('.sdb-integralis360.com')) {
@@ -77,7 +74,7 @@ pipeline {
                         env.MASTER_PWD = credentials('vault-integralis360.website')
                     }
 
-                    // --- OBTENER NOMBRE DE BD ---
+                    // --- OBTENER NOMBRE BD ---
                     def db_response = sh(script: """
                         curl -s -k -X POST "https://${params.ODOO_URL}/web/database/list" \
                         -H "Content-Type: application/json" \
