@@ -43,34 +43,39 @@ pipeline {
         stage('Conectar VPN y Descargar') {
             steps {
                 script {
-                    echo "--- Inyectando Configuración VPN (Método Seguro) ---"
+                    echo "--- Inyectando Configuración VPN ---"
                     
-                    // USAMOS EL PLUGIN "CONFIG FILE PROVIDER"
-                    // Esto pone el archivo real 'pasante.ovpn' en el directorio de trabajo actual.
-                    // 'variable' guarda la ruta, pero como estamos en el workspace, sabemos que está ahí.
+                    // Usamos el plugin para traer el archivo al workspace (aunque tenga espacios)
                     configFileProvider([configFile(fileId: 'vpn-pasante-file', targetLocation: 'pasante.ovpn')]) {
                         
-                        // Ajustamos permisos para que solo root (el usuario actual) lo lea
-                        sh "chmod 600 pasante.ovpn"
+                        echo "--- Moviendo a zona segura (/tmp) ---"
+                        // 1. COPIAMOS el archivo a /tmp para salirnos de la carpeta con espacios
+                        //    y para solucionar cualquier problema de permisos de usuario (1000 vs Root).
+                        sh "cp pasante.ovpn /tmp/vpn_final.ovpn"
                         
-                        // Verificación rápida
-                        sh "ls -l pasante.ovpn"
+                        // 2. Ajustamos permisos en el nuevo archivo
+                        sh "chmod 600 /tmp/vpn_final.ovpn"
+                        
+                        // 3. Verificamos (Debug)
+                        sh "ls -l /tmp/vpn_final.ovpn"
 
                         echo "--- Iniciando VPN ---"
-                        // Ejecutamos usando la ruta local.
-                        sh "openvpn --config pasante.ovpn --daemon --log vpn.log --verb 3"
+                        // 4. Ejecutamos OpenVPN apuntando al archivo en /tmp
+                        //    IMPORTANTE: Usamos la ruta absoluta /tmp/vpn_final.ovpn
+                        sh "openvpn --config /tmp/vpn_final.ovpn --daemon --log /tmp/vpn.log --verb 3"
                         
                         echo "Esperando conexión (15s)..."
                         sleep 15
                         
                         // DIAGNÓSTICO
-                        sh "cat vpn.log || echo 'No log file found'"
-                        sh "ifconfig tun0 || ip addr show tun0 || echo '⚠️ tun0 no levantó'"
+                        sh "cat /tmp/vpn.log || echo 'No log file found'"
+                        sh "ip addr show tun0 || echo '⚠️ tun0 no levantó'"
                         sh "ping -c 2 10.8.0.1 || echo '⚠️ Ping falló (Puede ser firewall, pero seguimos)'"
 
-                        // --- TU LÓGICA DE NEGOCIO ---
+                        // ... (AQUÍ CONTINÚA TU LÓGICA DE SIEMPRE: PASSWORD, BASE DE DATOS, ETC.) ...
+                        // Copia aquí el resto de tu código (Password Maestra, Curl, etc.)
                         
-                        // 1. Password Maestra
+                         // --- 1. Password Maestra ---
                         if (params.ODOO_URL.contains('.sdb-integralis360.com')) {
                             env.MASTER_PWD = credentials('vault-sdb-integralis360.com')
                         } else if (params.ODOO_URL.contains('.dic-integralis360.com')) {
@@ -81,7 +86,7 @@ pipeline {
                             env.MASTER_PWD = credentials('vault-integralis360.website')
                         }
 
-                        // 2. Obtener Nombre BD
+                        // --- 2. Obtener Nombre BD ---
                         def db_response = sh(script: """
                             curl -s -k -X POST "https://${params.ODOO_URL}/web/database/list" \
                             -H "Content-Type: application/json" \
@@ -92,7 +97,7 @@ pipeline {
                         env.DB_NAME = json_db.result[0]
                         echo "Base detectada: ${env.DB_NAME}"
                         
-                        // 3. Descargar
+                        // --- 3. Descargar ---
                         def date = sh(script: "date +%Y%m%d", returnStdout: true).trim()
                         def ext = (params.BACKUP_TYPE == 'zip') ? 'zip' : 'dump'
                         env.BACKUP_FILE = "backup_${env.DB_NAME}-${date}.${ext}"
@@ -106,7 +111,7 @@ pipeline {
                             "https://${params.ODOO_URL}/web/database/backup" \
                             -o "${env.BACKUP_FILE}"
                         """
-                    } // Fin del bloque configFileProvider
+                    } 
                 }
             }
         }
