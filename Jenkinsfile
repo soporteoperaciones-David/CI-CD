@@ -1,11 +1,9 @@
 pipeline {
     agent {
         docker {
-            // Usamos una imagen base de Ubuntu limpia
+            // Usamos Ubuntu 22.04 limpio
             image 'ubuntu:22.04'
-            // CRÍTICO:
-            // 1. -u root: Para poder instalar cosas con apt-get
-            // 2. --privileged y --device: Obligatorios para que OpenVPN pueda crear la interfaz tun0
+            // Damos permisos de ROOT y de RED (Tun/Tap) para la VPN
             args '-u root --privileged --cap-add=NET_ADMIN --device /dev/net/tun -v /var/run/docker.sock:/var/run/docker.sock'
         }
     }
@@ -20,8 +18,7 @@ pipeline {
 
     environment {
         // --- CREDENCIALES ---
-        // Sube tu archivo .ovpn a Jenkins en: "Manage Jenkins" -> "Credentials" -> "Secret File"
-        // ID: vpn-pasante-config
+        // El archivo .ovpn subido a Jenkins (Secret File)
         VPN_CONFIG = credentials('vpn-pasante-config')
         
         ROOT_PASS_ID = 'root-password-prod' 
@@ -32,8 +29,9 @@ pipeline {
         IP_TEST_V19 = "158.69.210.128"
         BACKUP_DIR_REMOTE = "/opt/backup_integralis"
 
-        // --- NGROK ---
-        ODOO_LOCAL_URL = "https://faceable-maddison-unharangued.ngrok-free.dev" // <--- ¡VERIFICA ESTO!
+        // --- NGROK / LOCAL ---
+        // ¡VERIFICA QUE ESTA URL SIGA SIENDO LA CORRECTA DE NGROK!
+        ODOO_LOCAL_URL = "https://faceable-maddison-unharangued.ngrok-free.dev" 
         ODOO_LOCAL_DB = "prueba"
         ODOO_LOCAL_PASS = credentials('odoo-local-api-key') 
     }
@@ -43,7 +41,7 @@ pipeline {
             steps {
                 script {
                     echo "--- Instalando herramientas en el contenedor efímero ---"
-                    // Como somos root dentro de este contenedor temporal, instalamos lo que queramos
+                    // Instalamos todo lo necesario de una sola vez
                     sh """
                         apt-get update
                         apt-get install -y openvpn curl sshpass iputils-ping python3
@@ -57,8 +55,9 @@ pipeline {
                 script {
                     echo "--- Iniciando VPN ---"
                     
-                    // Copiamos la configuración secreta a un archivo real
-                    sh "cp ${env.VPN_CONFIG} /tmp/vpn_config.ovpn"
+                    // CORRECCIÓN AQUÍ: Agregamos comillas simples '' alrededor de la variable
+                    // para manejar rutas con espacios.
+                    sh "cp '${env.VPN_CONFIG}' /tmp/vpn_config.ovpn"
 
                     // Iniciamos OpenVPN en background
                     sh "openvpn --config /tmp/vpn_config.ovpn --daemon"
@@ -66,8 +65,8 @@ pipeline {
                     echo "Esperando conexión..."
                     sleep 10
                     
-                    // Verificación (opcional)
-                    sh "ping -c 2 10.8.0.1 || echo 'Ping falló, pero intentamos seguir...'"
+                    // Verificación de conexión (Opcional, no falla si no hay ping)
+                    sh "ping -c 2 10.8.0.1 || echo 'Ping falló, pero continuamos...'"
 
                     // --- LÓGICA DE CONTRASEÑA MAESTRA ---
                     if (params.ODOO_URL.contains('.sdb-integralis360.com')) {
@@ -156,7 +155,7 @@ pipeline {
         stage('Notificaciones') {
              steps {
                 script {
-                    def chat_msg = """{"text": "✅ *Respaldo Completado*\\n*Base:* ${env.NEW_DB_NAME}\\n*Tipo:* ${params.BACKUP_TYPE}\\n*URL:* ${env.FINAL_URL}"}"""
+                    def chat_msg = """{"text": "*Respaldo Completado*\\n*Base:* ${env.NEW_DB_NAME}\\n*Tipo:* ${params.BACKUP_TYPE}\\n*URL:* ${env.FINAL_URL}"}"""
                     sh "curl -X POST -H 'Content-Type: application/json; charset=UTF-8' -d '${chat_msg}' '${env.GOOGLE_CHAT_WEBHOOK}' || true"
 
                     def odoo_payload = """
@@ -185,9 +184,6 @@ pipeline {
     post {
         always {
             cleanWs()
-            // Como el contenedor se destruye al final, no hace falta matar la VPN, 
-            // pero por si acaso falla a mitad de camino:
-            sh "killall openvpn || true" 
         }
         failure {
             script {
