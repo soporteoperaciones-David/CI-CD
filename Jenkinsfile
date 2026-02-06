@@ -3,9 +3,9 @@ pipeline {
         docker {
             image 'ubuntu:22.04'
             reuseNode true
-            // CAMBIO: Montamos toda la carpeta /home/ubuntu en /mnt/host_home
-            // Así evitamos que Docker cree carpetas vacías si se equivoca de archivo
-            args '-u root --privileged --cap-add=NET_ADMIN --device /dev/net/tun -v /var/run/docker.sock:/var/run/docker.sock -v /home/ubuntu:/mnt/host_home'
+            // NOTA: Ya no montamos volúmenes de /home/ubuntu.
+            // Solo necesitamos privilegios de red para la VPN.
+            args '-u root --privileged --cap-add=NET_ADMIN --device /dev/net/tun -v /var/run/docker.sock:/var/run/docker.sock'
         }
     }
 
@@ -18,6 +18,9 @@ pipeline {
     }
 
     environment {
+        // NO definimos la credencial aquí arriba para evitar errores de copia.
+        // La usaremos abajo con "withCredentials"
+        
         ROOT_PASS_ID = 'root-password-prod' 
         GOOGLE_CHAT_WEBHOOK = credentials('GOOGLE_CHAT_WEBHOOK')
         
@@ -43,64 +46,70 @@ pipeline {
         stage('Conectar VPN y Descargar') {
             steps {
                 script {
-                    echo "--- Buscando archivo VPN en el Host ---"
+                    echo "--- Inyectando Archivo Secreto ---"
                     
-                    // 1. DIAGNÓSTICO: Listamos qué hay en la carpeta montada
-                    sh "ls -la /mnt/host_home"
-                    
-                    // 2. COPIAR Y USAR
-                    // Buscamos el archivo. Si está en /home/ubuntu/pasante.ovpn, ahora estará en /mnt/host_home/pasante.ovpn
-                    sh "cp /mnt/host_home/pasante.ovpn /tmp/pasante.ovpn || echo '❌ ERROR: No encuentro pasante.ovpn en /home/ubuntu'"
-                    
-                    // Verificar que lo copiamos y NO es una carpeta (debe tener tamaño > 0)
-                    sh "ls -l /tmp/pasante.ovpn"
+                    // ESTA ES LA CLAVE DEL ÉXITO:
+                    // 'file' toma el archivo secreto 'vpn-pasante-config' y lo pone en una ruta temporal.
+                    // Esa ruta se guarda en la variable 'VPN_PATH_TEMP'.
+                    withCredentials([file(credentialsId: 'vpn-pasante-config', variable: 'VPN_PATH_TEMP')]) {
+                        
+                        // 1. Copiamos el archivo temporal a una ruta conocida con la extensión correcta (.ovpn)
+                        //    Jenkins a veces le pone nombres raros sin extensión.
+                        sh "cp \$VPN_PATH_TEMP /tmp/pasante.ovpn"
+                        
+                        // 2. Aseguramos permisos (root ya los tiene, pero por si acaso)
+                        sh "chmod 600 /tmp/pasante.ovpn"
+                        
+                        // 3. Verificamos que existe (Debug)
+                        sh "ls -l /tmp/pasante.ovpn"
+                        
+                        // 4. INICIAR VPN
+                        sh "openvpn --config /tmp/pasante.ovpn --daemon"
+                        
+                        echo "Esperando conexión..."
+                        sleep 15
+                        
+                        // Diagnóstico
+                        sh "ip addr show tun0 || echo '⚠️ La interfaz tun0 no aparece'"
+                        sh "ping -c 2 10.8.0.1 || echo '⚠️ Ping falló, pero intentamos continuar...'"
 
-                    echo "--- Iniciando VPN ---"
-                    sh "openvpn --config /tmp/pasante.ovpn --daemon"
-                    
-                    echo "Esperando conexión..."
-                    sleep 15
-                    
-                    // Diagnóstico
-                    sh "ip addr show tun0 || echo '⚠️ La interfaz tun0 no aparece'"
-                    sh "ping -c 2 10.8.0.1 || echo '⚠️ Ping falló, pero continuamos...'"
+                        // --- LÓGICA DE CONTRASEÑA MAESTRA ---
+                        if (params.ODOO_URL.contains('.sdb-integralis360.com')) {
+                            env.MASTER_PWD = credentials('vault-sdb-integralis360.com')
+                        } else if (params.ODOO_URL.contains('.dic-integralis360.com')) {
+                            env.MASTER_PWD = credentials('dic-integralis360.com')
+                        } else if (params.ODOO_URL.contains('lns') || params.ODOO_URL.contains('edb') || params.ODOO_URL.contains('cgs')) {
+                                env.MASTER_PWD = credentials('dic-lns') 
+                        } else {
+                            env.MASTER_PWD = credentials('vault-integralis360.website')
+                        }
 
-                    // --- LÓGICA DE CONTRASEÑA MAESTRA ---
-                    if (params.ODOO_URL.contains('.sdb-integralis360.com')) {
-                        env.MASTER_PWD = credentials('vault-sdb-integralis360.com')
-                    } else if (params.ODOO_URL.contains('.dic-integralis360.com')) {
-                        env.MASTER_PWD = credentials('dic-integralis360.com')
-                    } else if (params.ODOO_URL.contains('lns') || params.ODOO_URL.contains('edb') || params.ODOO_URL.contains('cgs')) {
-                            env.MASTER_PWD = credentials('dic-lns') 
-                    } else {
-                        env.MASTER_PWD = credentials('vault-integralis360.website')
-                    }
-
-                    // --- OBTENER NOMBRE BD ---
-                    def db_response = sh(script: """
-                        curl -s -k -X POST "https://${params.ODOO_URL}/web/database/list" \
-                        -H "Content-Type: application/json" \
-                        -d '{"params": {"master_pwd": "${env.MASTER_PWD}"}}'
-                    """, returnStdout: true).trim()
-                    
-                    def json_db = readJSON text: db_response
-                    env.DB_NAME = json_db.result[0]
-                    echo "Base detectada: ${env.DB_NAME}"
-                    
-                    // --- DESCARGAR ---
-                    def date = sh(script: "date +%Y%m%d", returnStdout: true).trim()
-                    def ext = (params.BACKUP_TYPE == 'zip') ? 'zip' : 'dump'
-                    env.BACKUP_FILE = "backup_${env.DB_NAME}-${date}.${ext}"
-                    
-                    echo "Descargando backup..."
-                    sh """
-                        curl -k -X POST \
-                        -F "master_pwd=${env.MASTER_PWD}" \
-                        -F "name=${env.DB_NAME}" \
-                        -F "backup_format=${params.BACKUP_TYPE}" \
-                        "https://${params.ODOO_URL}/web/database/backup" \
-                        -o "${env.BACKUP_FILE}"
-                    """
+                        // --- OBTENER NOMBRE BD ---
+                        def db_response = sh(script: """
+                            curl -s -k -X POST "https://${params.ODOO_URL}/web/database/list" \
+                            -H "Content-Type: application/json" \
+                            -d '{"params": {"master_pwd": "${env.MASTER_PWD}"}}'
+                        """, returnStdout: true).trim()
+                        
+                        def json_db = readJSON text: db_response
+                        env.DB_NAME = json_db.result[0]
+                        echo "Base detectada: ${env.DB_NAME}"
+                        
+                        // --- DESCARGAR ---
+                        def date = sh(script: "date +%Y%m%d", returnStdout: true).trim()
+                        def ext = (params.BACKUP_TYPE == 'zip') ? 'zip' : 'dump'
+                        env.BACKUP_FILE = "backup_${env.DB_NAME}-${date}.${ext}"
+                        
+                        echo "Descargando backup..."
+                        sh """
+                            curl -k -X POST \
+                            -F "master_pwd=${env.MASTER_PWD}" \
+                            -F "name=${env.DB_NAME}" \
+                            -F "backup_format=${params.BACKUP_TYPE}" \
+                            "https://${params.ODOO_URL}/web/database/backup" \
+                            -o "${env.BACKUP_FILE}"
+                        """
+                    } // Fin del bloque withCredentials (El archivo temporal se borra aquí automáticamente por seguridad)
                 }
             }
         }
