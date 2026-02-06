@@ -3,10 +3,9 @@ pipeline {
         docker {
             image 'ubuntu:22.04'
             reuseNode true
-            // CAMBIO CLAVE AQUÍ ABAJO:
-            // Agregamos: -v /home/ubuntu/pasante.ovpn:/tmp/pasante.ovpn
-            // Esto conecta el archivo físico del servidor directo al contenedor en /tmp
-            args '-u root --privileged --cap-add=NET_ADMIN --device /dev/net/tun -v /var/run/docker.sock:/var/run/docker.sock -v /home/ubuntu/pasante.ovpn:/tmp/pasante.ovpn'
+            // CAMBIO: Montamos toda la carpeta /home/ubuntu en /mnt/host_home
+            // Así evitamos que Docker cree carpetas vacías si se equivoca de archivo
+            args '-u root --privileged --cap-add=NET_ADMIN --device /dev/net/tun -v /var/run/docker.sock:/var/run/docker.sock -v /home/ubuntu:/mnt/host_home'
         }
     }
 
@@ -19,8 +18,6 @@ pipeline {
     }
 
     environment {
-        // YA NO NECESITAMOS LA CREDENCIAL DE VPN AQUÍ
-        
         ROOT_PASS_ID = 'root-password-prod' 
         GOOGLE_CHAT_WEBHOOK = credentials('GOOGLE_CHAT_WEBHOOK')
         
@@ -28,7 +25,7 @@ pipeline {
         IP_TEST_V19 = "158.69.210.128"
         BACKUP_DIR_REMOTE = "/opt/backup_integralis"
 
-        ODOO_LOCAL_URL = "https://faceable-maddison-unharangued.ngrok-free.dev" // <--- ¡VERIFICA TU NGROK!
+        ODOO_LOCAL_URL = "https://tu-url-ngrok.ngrok-free.app" // <--- ¡VERIFICA TU NGROK!
         ODOO_LOCAL_DB = "prueba"
         ODOO_LOCAL_PASS = credentials('odoo-local-api-key') 
     }
@@ -46,22 +43,27 @@ pipeline {
         stage('Conectar VPN y Descargar') {
             steps {
                 script {
-                    echo "--- Iniciando VPN (Desde archivo montado) ---"
+                    echo "--- Buscando archivo VPN en el Host ---"
                     
-                    // Como el archivo ya "apareció" mágicamente en /tmp/pasante.ovpn gracias al volumen
-                    // solo verificamos que esté ahí y lo usamos.
+                    // 1. DIAGNÓSTICO: Listamos qué hay en la carpeta montada
+                    sh "ls -la /mnt/host_home"
                     
+                    // 2. COPIAR Y USAR
+                    // Buscamos el archivo. Si está en /home/ubuntu/pasante.ovpn, ahora estará en /mnt/host_home/pasante.ovpn
+                    sh "cp /mnt/host_home/pasante.ovpn /tmp/pasante.ovpn || echo '❌ ERROR: No encuentro pasante.ovpn en /home/ubuntu'"
+                    
+                    // Verificar que lo copiamos y NO es una carpeta (debe tener tamaño > 0)
                     sh "ls -l /tmp/pasante.ovpn"
-                    
-                    // Iniciamos OpenVPN apuntando al archivo montado
+
+                    echo "--- Iniciando VPN ---"
                     sh "openvpn --config /tmp/pasante.ovpn --daemon"
                     
                     echo "Esperando conexión..."
                     sleep 15
                     
                     // Diagnóstico
-                    sh "ip addr show tun0 || echo 'La interfaz tun0 no aparece'"
-                    sh "ping -c 2 10.8.0.1 || echo ' Ping falló, pero continuamos...'"
+                    sh "ip addr show tun0 || echo '⚠️ La interfaz tun0 no aparece'"
+                    sh "ping -c 2 10.8.0.1 || echo '⚠️ Ping falló, pero continuamos...'"
 
                     // --- LÓGICA DE CONTRASEÑA MAESTRA ---
                     if (params.ODOO_URL.contains('.sdb-integralis360.com')) {
@@ -146,7 +148,7 @@ pipeline {
         stage('Notificar') {
             steps {
                 script {
-                    def chat_msg = """{"text": "*Respaldo Completado*\\n*Base:* ${env.NEW_DB_NAME}\\n*URL:* ${env.FINAL_URL}"}"""
+                    def chat_msg = """{"text": "✅ *Respaldo Completado*\\n*Base:* ${env.NEW_DB_NAME}\\n*URL:* ${env.FINAL_URL}"}"""
                     sh "curl -X POST -H 'Content-Type: application/json; charset=UTF-8' -d '${chat_msg}' '${env.GOOGLE_CHAT_WEBHOOK}' || true"
 
                     def odoo_payload = """
