@@ -55,7 +55,7 @@ pipeline {
                         
                         // 1. Copiamos el archivo temporal a una ruta conocida con la extensión correcta (.ovpn)
                         //    Jenkins a veces le pone nombres raros sin extensión.
-                        sh "cp \$VPN_PATH_TEMP /tmp/pasante.ovpn"
+                        sh "cp \"$VPN_PATH_TEMP\" /tmp/pasante.ovpn"
                         
                         // 2. Aseguramos permisos (root ya los tiene, pero por si acaso)
                         sh "chmod 600 /tmp/pasante.ovpn"
