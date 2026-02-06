@@ -3,8 +3,8 @@ pipeline {
         docker {
             image 'ubuntu:22.04'
             reuseNode true
-            // Permisos de red
-            args '-u root --privileged --cap-add=NET_ADMIN --device /dev/net/tun -v /var/run/docker.sock:/var/run/docker.sock'
+            // Agregamos --security-opt apparmor=unconfined por si acaso el host bloquea a OpenVPN
+            args '-u root --privileged --cap-add=NET_ADMIN --device /dev/net/tun --security-opt apparmor=unconfined -v /var/run/docker.sock:/var/run/docker.sock'
         }
     }
 
@@ -17,9 +17,7 @@ pipeline {
     }
 
     environment {
-        // Obtenemos el Base64 seguro desde Jenkins
-        VPN_B64 = credentials('vpn-base64-config')
-        
+        // Credenciales
         ROOT_PASS_ID = 'root-password-prod' 
         GOOGLE_CHAT_WEBHOOK = credentials('GOOGLE_CHAT_WEBHOOK')
         
@@ -27,7 +25,7 @@ pipeline {
         IP_TEST_V19 = "158.69.210.128"
         BACKUP_DIR_REMOTE = "/opt/backup_integralis"
 
-        ODOO_LOCAL_URL = "https://faceable-maddison-unharangued.ngrok-free.dev" // <--- ¡VERIFICA NGROK!
+        ODOO_LOCAL_URL = "https://faceable-maddison-unharangued.ngrok-free.dev" 
         ODOO_LOCAL_DB = "prueba"
         ODOO_LOCAL_PASS = credentials('odoo-local-api-key') 
     }
@@ -45,69 +43,71 @@ pipeline {
         stage('Conectar VPN y Descargar') {
             steps {
                 script {
-                    echo "--- Decodificando VPN de forma segura ---"
+                    echo "--- Inyectando Configuración VPN (Método Seguro) ---"
                     
-                    // TRUCO MAESTRO:
-                    // 1. Imprimimos el secreto base64 (Jenkins lo censura con ****, es seguro)
-                    // 2. Lo pasamos por 'base64 -d' para reconstruir el archivo original
-                    // 3. Lo guardamos en el workspace actual
-                    sh 'echo $VPN_B64 | base64 -d > pasante.ovpn'
-                    
-                    // Aseguramos permisos (Solo lectura para el dueño)
-                    sh 'chmod 600 pasante.ovpn'
-                    
-                    // Verificamos que se creó (debe pesar más de 0 bytes)
-                    sh 'ls -l pasante.ovpn'
-                    
-                    echo "--- Iniciando VPN ---"
-                    // --verb 3 para ver detalles si falla
-                    sh 'openvpn --config pasante.ovpn --daemon --verb 3 --log vpn.log'
-                    
-                    echo "Esperando conexión..."
-                    sleep 15
-                    
-                    // Diagnóstico
-                    sh "cat vpn.log || echo 'No log'"
-                    sh "ip addr show tun0 || echo '⚠️ La interfaz tun0 no aparece'"
-                    sh "ping -c 2 10.8.0.1 || echo '⚠️ Ping falló, intentando continuar...'"
+                    // USAMOS EL PLUGIN "CONFIG FILE PROVIDER"
+                    // Esto pone el archivo real 'pasante.ovpn' en el directorio de trabajo actual.
+                    // 'variable' guarda la ruta, pero como estamos en el workspace, sabemos que está ahí.
+                    configFileProvider([configFile(fileId: 'vpn-pasante-file', targetLocation: 'pasante.ovpn')]) {
+                        
+                        // Ajustamos permisos para que solo root (el usuario actual) lo lea
+                        sh "chmod 600 pasante.ovpn"
+                        
+                        // Verificación rápida
+                        sh "ls -l pasante.ovpn"
 
-                    // --- LÓGICA DE CONTRASEÑA MAESTRA ---
-                    if (params.ODOO_URL.contains('.sdb-integralis360.com')) {
-                        env.MASTER_PWD = credentials('vault-sdb-integralis360.com')
-                    } else if (params.ODOO_URL.contains('.dic-integralis360.com')) {
-                        env.MASTER_PWD = credentials('dic-integralis360.com')
-                    } else if (params.ODOO_URL.contains('lns') || params.ODOO_URL.contains('edb') || params.ODOO_URL.contains('cgs')) {
-                            env.MASTER_PWD = credentials('dic-lns') 
-                    } else {
-                        env.MASTER_PWD = credentials('vault-integralis360.website')
-                    }
+                        echo "--- Iniciando VPN ---"
+                        // Ejecutamos usando la ruta local.
+                        sh "openvpn --config pasante.ovpn --daemon --log vpn.log --verb 3"
+                        
+                        echo "Esperando conexión (15s)..."
+                        sleep 15
+                        
+                        // DIAGNÓSTICO
+                        sh "cat vpn.log || echo 'No log file found'"
+                        sh "ifconfig tun0 || ip addr show tun0 || echo '⚠️ tun0 no levantó'"
+                        sh "ping -c 2 10.8.0.1 || echo '⚠️ Ping falló (Puede ser firewall, pero seguimos)'"
 
-                    // --- OBTENER NOMBRE BD ---
-                    def db_response = sh(script: """
-                        curl -s -k -X POST "https://${params.ODOO_URL}/web/database/list" \
-                        -H "Content-Type: application/json" \
-                        -d '{"params": {"master_pwd": "${env.MASTER_PWD}"}}'
-                    """, returnStdout: true).trim()
-                    
-                    def json_db = readJSON text: db_response
-                    env.DB_NAME = json_db.result[0]
-                    echo "Base detectada: ${env.DB_NAME}"
-                    
-                    // --- DESCARGAR ---
-                    def date = sh(script: "date +%Y%m%d", returnStdout: true).trim()
-                    def ext = (params.BACKUP_TYPE == 'zip') ? 'zip' : 'dump'
-                    env.BACKUP_FILE = "backup_${env.DB_NAME}-${date}.${ext}"
-                    
-                    echo "Descargando backup..."
-                    sh """
-                        curl -k -X POST \
-                        -F "master_pwd=${env.MASTER_PWD}" \
-                        -F "name=${env.DB_NAME}" \
-                        -F "backup_format=${params.BACKUP_TYPE}" \
-                        "https://${params.ODOO_URL}/web/database/backup" \
-                        -o "${env.BACKUP_FILE}"
-                    """
-                } 
+                        // --- TU LÓGICA DE NEGOCIO ---
+                        
+                        // 1. Password Maestra
+                        if (params.ODOO_URL.contains('.sdb-integralis360.com')) {
+                            env.MASTER_PWD = credentials('vault-sdb-integralis360.com')
+                        } else if (params.ODOO_URL.contains('.dic-integralis360.com')) {
+                            env.MASTER_PWD = credentials('dic-integralis360.com')
+                        } else if (params.ODOO_URL.contains('lns') || params.ODOO_URL.contains('edb') || params.ODOO_URL.contains('cgs')) {
+                                env.MASTER_PWD = credentials('dic-lns') 
+                        } else {
+                            env.MASTER_PWD = credentials('vault-integralis360.website')
+                        }
+
+                        // 2. Obtener Nombre BD
+                        def db_response = sh(script: """
+                            curl -s -k -X POST "https://${params.ODOO_URL}/web/database/list" \
+                            -H "Content-Type: application/json" \
+                            -d '{"params": {"master_pwd": "${env.MASTER_PWD}"}}'
+                        """, returnStdout: true).trim()
+                        
+                        def json_db = readJSON text: db_response
+                        env.DB_NAME = json_db.result[0]
+                        echo "Base detectada: ${env.DB_NAME}"
+                        
+                        // 3. Descargar
+                        def date = sh(script: "date +%Y%m%d", returnStdout: true).trim()
+                        def ext = (params.BACKUP_TYPE == 'zip') ? 'zip' : 'dump'
+                        env.BACKUP_FILE = "backup_${env.DB_NAME}-${date}.${ext}"
+                        
+                        echo "Descargando backup..."
+                        sh """
+                            curl -k -X POST \
+                            -F "master_pwd=${env.MASTER_PWD}" \
+                            -F "name=${env.DB_NAME}" \
+                            -F "backup_format=${params.BACKUP_TYPE}" \
+                            "https://${params.ODOO_URL}/web/database/backup" \
+                            -o "${env.BACKUP_FILE}"
+                        """
+                    } // Fin del bloque configFileProvider
+                }
             }
         }
 
@@ -179,26 +179,6 @@ pipeline {
     post {
         always {
             cleanWs()
-        }
-        failure {
-            script {
-                if (params.ODOO_ID) {
-                    def err_payload = """
-                    {
-                        "jsonrpc": "2.0", "method": "call",
-                        "params": {
-                            "service": "object", "method": "execute_kw",
-                            "args": [
-                                "${env.ODOO_LOCAL_DB}", 2, "${env.ODOO_LOCAL_PASS}",
-                                "backup.automation", "write",
-                                [[${params.ODOO_ID}], {"state": "error", "jenkins_log": "Fallo en Jenkins"}]
-                            ]
-                        }
-                    }
-                    """
-                    sh "curl -X POST -H 'Content-Type: application/json' -d '${err_payload}' '${env.ODOO_LOCAL_URL}/jsonrpc' || true"
-                }
-            }
         }
     }
 }
