@@ -1,5 +1,14 @@
 pipeline {
-    agent any
+    agent {
+        docker {
+            // Usamos una imagen base de Ubuntu limpia
+            image 'ubuntu:22.04'
+            // CRÍTICO:
+            // 1. -u root: Para poder instalar cosas con apt-get
+            // 2. --privileged y --device: Obligatorios para que OpenVPN pueda crear la interfaz tun0
+            args '-u root --privileged --cap-add=NET_ADMIN --device /dev/net/tun -v /var/run/docker.sock:/var/run/docker.sock'
+        }
+    }
 
     parameters {
         string(name: 'ODOO_URL', defaultValue: '', description: 'URL de producción')
@@ -10,117 +19,100 @@ pipeline {
     }
 
     environment {
-        // --- RUTAS Y CONFIGURACIÓN ---
-        BACKUP_DIR_REMOTE = "/opt/backup_integralis"
-        
-        // IP DEL HOST (El servidor físico visto desde Docker)
-        HOST_IP = "172.17.0.1"
-        HOST_VPN_CONFIG = "/root/pasante.ovpn" 
-        
         // --- CREDENCIALES ---
+        // Sube tu archivo .ovpn a Jenkins en: "Manage Jenkins" -> "Credentials" -> "Secret File"
+        // ID: vpn-pasante-config
+        VPN_CONFIG = credentials('vpn-pasante-config')
+        
         ROOT_PASS_ID = 'root-password-prod' 
         GOOGLE_CHAT_WEBHOOK = credentials('GOOGLE_CHAT_WEBHOOK')
         
-        // --- SERVIDORES DESTINO ---
+        // --- DESTINOS ---
         IP_TEST_V15 = "148.113.165.227" 
         IP_TEST_V19 = "158.69.210.128"
+        BACKUP_DIR_REMOTE = "/opt/backup_integralis"
 
-        // --- ODOO LOCAL (Usando Ngrok o IP Pública) ---
-        // ASEGÚRATE QUE ESTA URL SEA LA CORRECTA DE NGROK
-        ODOO_LOCAL_URL = "https://tu-url-de-ngrok.ngrok-free.app" // <-- ¡ACTUALIZA ESTO!
+        // --- NGROK ---
+        ODOO_LOCAL_URL = "https://faceable-maddison-unharangued.ngrok-free.dev" // <--- ¡VERIFICA ESTO!
         ODOO_LOCAL_DB = "prueba"
         ODOO_LOCAL_PASS = credentials('odoo-local-api-key') 
     }
 
     stages {
-        stage('Delegar VPN y Descarga al Host') {
+        stage('Preparar Entorno Docker') {
             steps {
                 script {
-                    echo "--- 1. Conectando al Servidor Host (${env.HOST_IP}) para VPN ---"
-                    
-                    withCredentials([string(credentialsId: env.ROOT_PASS_ID, variable: 'ROOT_PASS')]) {
-                        
-                        // A. DEFINIR LÓGICA DE CONTRASEÑA MAESTRA
-                        if (params.ODOO_URL.contains('.sdb-integralis360.com')) {
-                            env.MASTER_PWD = credentials('vault-sdb-integralis360.com')
-                        } else if (params.ODOO_URL.contains('.dic-integralis360.com')) {
-                            env.MASTER_PWD = credentials('dic-integralis360.com')
-                        } else if (params.ODOO_URL.contains('lns') || params.ODOO_URL.contains('edb') || params.ODOO_URL.contains('cgs')) {
-                             env.MASTER_PWD = credentials('dic-lns') 
-                        } else {
-                            env.MASTER_PWD = credentials('vault-integralis360.website')
-                        }
-
-                        // B. SCRIPT REMOTO: VPN + DATABASE LIST + DOWNLOAD
-                        // Este bloque de texto bash se ejecutará en el servidor físico, no en Jenkins
-                        def remote_script = """
-                            # 1. Gestionar VPN
-                            killall openvpn || true
-                            openvpn --config ${env.HOST_VPN_CONFIG} --daemon
-                            echo "Esperando VPN..."
-                            sleep 10
-                            
-                            # 2. Obtener Nombre de la BD (Curl a través de la VPN)
-                            DB_JSON=\$(curl -s -k -X POST "https://${params.ODOO_URL}/web/database/list" \
-                                -H "Content-Type: application/json" \
-                                -d '{"params": {"master_pwd": "${env.MASTER_PWD}"}}')
-                            
-                            # Extraer nombre usando python (más seguro que grep)
-                            DB_NAME=\$(echo \$DB_JSON | python3 -c "import sys, json; print(json.load(sys.stdin)['result'][0])")
-                            echo "Base detectada: \$DB_NAME"
-                            
-                            # 3. Preparar nombre de archivo
-                            DATE=\$(date +%Y%m%d)
-                            EXT="dump"
-                            [ "${params.BACKUP_TYPE}" = "zip" ] && EXT="zip"
-                            BACKUP_PATH="/tmp/backup_\${DB_NAME}-\${DATE}.\${EXT}"
-                            
-                            # 4. Descargar Respaldo
-                            echo "Descargando..."
-                            curl -k -X POST \
-                                -F "master_pwd=${env.MASTER_PWD}" \
-                                -F "name=\$DB_NAME" \
-                                -F "backup_format=${params.BACKUP_TYPE}" \
-                                "https://${params.ODOO_URL}/web/database/backup" \
-                                -o "\$BACKUP_PATH"
-                            
-                            # 5. Dar permisos y reportar nombre final
-                            chmod 644 "\$BACKUP_PATH"
-                            echo "FILENAME:\$BACKUP_PATH"
-                            echo "DBNAME_ONLY:\$DB_NAME"
-                        """
-
-                        echo "Ejecutando operaciones en el Host..."
-                        // Ejecutamos SSH y capturamos la salida para saber el nombre del archivo
-                        def output = sh(script: "sshpass -p '${ROOT_PASS}' ssh -o StrictHostKeyChecking=no root@${env.HOST_IP} '${remote_script}'", returnStdout: true).trim()
-                        echo "Salida del Host: \n${output}"
-                        
-                        // Parsear el nombre del archivo y la BD de la salida del script
-                        def remote_file_path = output.split('\n').find { it.startsWith('FILENAME:') }?.split(':')?.getAt(1)
-                        env.DB_NAME = output.split('\n').find { it.startsWith('DBNAME_ONLY:') }?.split(':')?.getAt(1)
-                        
-                        if (!remote_file_path || !env.DB_NAME) {
-                            error "No se pudo obtener el nombre del archivo o base de datos. Revisa la conexión VPN en el Host."
-                        }
-                        
-                        // Definir nombre local en Jenkins
-                        env.LOCAL_BACKUP_FILE = remote_file_path.split('/').last()
-                        
-                        // C. TRAER ARCHIVO A JENKINS (SCP)
-                        echo "Trayendo archivo ${remote_file_path} a Jenkins..."
-                        sh "sshpass -p '${ROOT_PASS}' scp -o StrictHostKeyChecking=no root@${env.HOST_IP}:${remote_file_path} ./${env.LOCAL_BACKUP_FILE}"
-                        
-                        // D. LIMPIEZA EN HOST (Importante para no llenar el disco del servidor)
-                        sh "sshpass -p '${ROOT_PASS}' ssh -o StrictHostKeyChecking=no root@${env.HOST_IP} 'rm -f ${remote_file_path}; killall openvpn || true'"
-                    }
+                    echo "--- Instalando herramientas en el contenedor efímero ---"
+                    // Como somos root dentro de este contenedor temporal, instalamos lo que queramos
+                    sh """
+                        apt-get update
+                        apt-get install -y openvpn curl sshpass iputils-ping python3
+                    """
                 }
             }
         }
 
-        stage('Lógica de Versión y Restore') {
+        stage('Conectar VPN y Descargar') {
             steps {
                 script {
-                    // Calculamos la versión de Postgres basándonos en el nombre obtenido
+                    echo "--- Iniciando VPN ---"
+                    
+                    // Copiamos la configuración secreta a un archivo real
+                    sh "cp ${env.VPN_CONFIG} /tmp/vpn_config.ovpn"
+
+                    // Iniciamos OpenVPN en background
+                    sh "openvpn --config /tmp/vpn_config.ovpn --daemon"
+                    
+                    echo "Esperando conexión..."
+                    sleep 10
+                    
+                    // Verificación (opcional)
+                    sh "ping -c 2 10.8.0.1 || echo 'Ping falló, pero intentamos seguir...'"
+
+                    // --- LÓGICA DE CONTRASEÑA MAESTRA ---
+                    if (params.ODOO_URL.contains('.sdb-integralis360.com')) {
+                        env.MASTER_PWD = credentials('vault-sdb-integralis360.com')
+                    } else if (params.ODOO_URL.contains('.dic-integralis360.com')) {
+                        env.MASTER_PWD = credentials('dic-integralis360.com')
+                    } else if (params.ODOO_URL.contains('lns') || params.ODOO_URL.contains('edb') || params.ODOO_URL.contains('cgs')) {
+                            env.MASTER_PWD = credentials('dic-lns') 
+                    } else {
+                        env.MASTER_PWD = credentials('vault-integralis360.website')
+                    }
+
+                    // --- OBTENER NOMBRE DE BD ---
+                    def db_response = sh(script: """
+                        curl -s -k -X POST "https://${params.ODOO_URL}/web/database/list" \
+                        -H "Content-Type: application/json" \
+                        -d '{"params": {"master_pwd": "${env.MASTER_PWD}"}}'
+                    """, returnStdout: true).trim()
+                    
+                    def json_db = readJSON text: db_response
+                    env.DB_NAME = json_db.result[0]
+                    echo "Base detectada: ${env.DB_NAME}"
+                    
+                    // --- DESCARGAR ---
+                    def date = sh(script: "date +%Y%m%d", returnStdout: true).trim()
+                    def ext = (params.BACKUP_TYPE == 'zip') ? 'zip' : 'dump'
+                    env.BACKUP_FILE = "backup_${env.DB_NAME}-${date}.${ext}"
+                    
+                    echo "Descargando backup..."
+                    sh """
+                        curl -k -X POST \
+                        -F "master_pwd=${env.MASTER_PWD}" \
+                        -F "name=${env.DB_NAME}" \
+                        -F "backup_format=${params.BACKUP_TYPE}" \
+                        "https://${params.ODOO_URL}/web/database/backup" \
+                        -o "${env.BACKUP_FILE}"
+                    """
+                }
+            }
+        }
+
+        stage('Enviar y Restaurar') {
+            steps {
+                script {
+                    // Calculamos versión Postgres
                     env.PG_BIN_VERSION = "17" 
                     if (params.ODOO_URL.contains('sdb-integralis360.com')) {
                         env.PG_BIN_VERSION = "12"
@@ -136,10 +128,11 @@ pipeline {
                     env.FINAL_URL = "https://${env.NEW_DB_NAME}.odooecuador.online/web/login"
 
                     withCredentials([string(credentialsId: env.ROOT_PASS_ID, variable: 'ROOT_PASS')]) {
-                        echo "Enviando a servidor destino (${target_ip})..."
-                        sh "sshpass -p '${ROOT_PASS}' scp -o StrictHostKeyChecking=no ${env.LOCAL_BACKUP_FILE} root@${target_ip}:${env.BACKUP_DIR_REMOTE}/"
+                        // Enviamos con sshpass (que instalamos en el primer stage)
+                        echo "Enviando a ${target_ip}..."
+                        sh "sshpass -p '${ROOT_PASS}' scp -o StrictHostKeyChecking=no ${env.BACKUP_FILE} root@${target_ip}:${env.BACKUP_DIR_REMOTE}/"
 
-                        echo "Restaurando en destino..."
+                        echo "Restaurando..."
                         sh """
                             sshpass -p '${ROOT_PASS}' ssh -o StrictHostKeyChecking=no root@${target_ip} '
                                 update-alternatives --set psql /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/psql
@@ -148,26 +141,24 @@ pipeline {
                                 
                                 curl -k -X POST "http://localhost:8069/web/database/restore" \
                                     -F "master_pwd=${env.MASTER_PWD}" \
-                                    -F "file=@${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}" \
+                                    -F "file=@${env.BACKUP_DIR_REMOTE}/${env.BACKUP_FILE}" \
                                     -F "name=${env.NEW_DB_NAME}" \
                                     -F "copy=true"
                                 
-                                rm -f ${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}
+                                rm -f ${env.BACKUP_DIR_REMOTE}/${env.BACKUP_FILE}
                             '
                         """
                     }
                 }
             }
         }
-
+        
         stage('Notificaciones') {
-            steps {
+             steps {
                 script {
-                    // Google Chat
-                    def chat_msg = """{"text": "*Respaldo Completado*\\n*Base:* ${env.NEW_DB_NAME}\\n*Tipo:* ${params.BACKUP_TYPE}\\n*URL:* ${env.FINAL_URL}"}"""
+                    def chat_msg = """{"text": "✅ *Respaldo Completado*\\n*Base:* ${env.NEW_DB_NAME}\\n*Tipo:* ${params.BACKUP_TYPE}\\n*URL:* ${env.FINAL_URL}"}"""
                     sh "curl -X POST -H 'Content-Type: application/json; charset=UTF-8' -d '${chat_msg}' '${env.GOOGLE_CHAT_WEBHOOK}' || true"
 
-                    // Odoo Success
                     def odoo_payload = """
                     {
                         "jsonrpc": "2.0", "method": "call",
@@ -190,20 +181,16 @@ pipeline {
             }
         }
     }
-
+    
     post {
         always {
             cleanWs()
-            // Intento de seguridad extra: matar la VPN en el host si quedó colgada
-            script {
-                withCredentials([string(credentialsId: env.ROOT_PASS_ID, variable: 'ROOT_PASS')]) {
-                    sh "sshpass -p '${ROOT_PASS}' ssh -o StrictHostKeyChecking=no root@${env.HOST_IP} 'killall openvpn || true'"
-                }
-            }
+            // Como el contenedor se destruye al final, no hace falta matar la VPN, 
+            // pero por si acaso falla a mitad de camino:
+            sh "killall openvpn || true" 
         }
         failure {
             script {
-                echo "Pipeline Fallido."
                 if (params.ODOO_ID) {
                     def error_msg = "Fallo en Jenkins #${env.BUILD_NUMBER}. Ver logs: ${env.BUILD_URL}"
                     def err_payload = """
