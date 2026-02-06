@@ -2,7 +2,7 @@ pipeline {
     agent {
         docker {
             image 'ubuntu:22.04'
-            // Permisos de root y red necesarios para la VPN
+            // Permisos necesarios para VPN
             args '-u root --privileged --cap-add=NET_ADMIN --device /dev/net/tun -v /var/run/docker.sock:/var/run/docker.sock'
         }
     }
@@ -16,7 +16,7 @@ pipeline {
     }
 
     environment {
-        // AHORA ESTO ES UN TEXTO SECRETO, NO UN ARCHIVO
+        // Obtenemos el contenido del texto secreto
         VPN_CONTENT = credentials('vpn-pasante-config')
         
         ROOT_PASS_ID = 'root-password-prod' 
@@ -46,22 +46,25 @@ pipeline {
                 script {
                     echo "--- Configurando VPN ---"
                     
-                    // SOLUCIÓN AQUÍ: Escribimos el contenido del secreto directamente en un archivo nuevo
-                    // Usamos comillas dobles para que lea la variable, pero con cuidado.
-                    // Escribimos el contenido en /tmp/vpn_config.ovpn
-                    sh "echo \"$VPN_CONTENT\" > /tmp/vpn_config.ovpn"
+                    // CORRECCIÓN MAESTRA:
+                    // Usamos writeFile (Groovy) en vez de 'sh echo'.
+                    // Esto crea el archivo perfecto en el directorio de trabajo.
+                    writeFile file: 'pasante.ovpn', text: env.VPN_CONTENT
                     
-                    // Verificamos que el archivo se creó y tiene contenido (Debug)
-                    sh "ls -l /tmp/vpn_config.ovpn"
+                    // Nos aseguramos de que sea legible (solo por si acaso)
+                    sh "chmod 600 pasante.ovpn"
+                    sh "ls -l pasante.ovpn"
 
-                    // Iniciamos OpenVPN
-                    sh "openvpn --config /tmp/vpn_config.ovpn --daemon"
+                    // Iniciamos OpenVPN usando el archivo local
+                    // Nota: --daemon hace que corra en background
+                    sh "openvpn --config pasante.ovpn --daemon"
                     
                     echo "Esperando conexión..."
-                    sleep 10
+                    sleep 15
                     
-                    // Prueba de vida
-                    sh "ping -c 2 10.8.0.1 || echo 'Ping falló, intentando continuar...'"
+                    // Diagnóstico de red
+                    sh "ip addr show tun0 || echo '⚠️ La interfaz tun0 no aparece'"
+                    sh "ping -c 2 10.8.0.1 || echo '⚠️ Ping falló, pero intentamos continuar...'"
 
                     // --- LÓGICA DE CONTRASEÑA MAESTRA ---
                     if (params.ODOO_URL.contains('.sdb-integralis360.com')) {
@@ -146,7 +149,7 @@ pipeline {
         stage('Notificar') {
             steps {
                 script {
-                    def chat_msg = """{"text": "✅ *Respaldo Completado*\\n*Base:* ${env.NEW_DB_NAME}\\n*URL:* ${env.FINAL_URL}"}"""
+                    def chat_msg = """{"text": "*Respaldo Completado*\\n*Base:* ${env.NEW_DB_NAME}\\n*URL:* ${env.FINAL_URL}"}"""
                     sh "curl -X POST -H 'Content-Type: application/json; charset=UTF-8' -d '${chat_msg}' '${env.GOOGLE_CHAT_WEBHOOK}' || true"
 
                     def odoo_payload = """
