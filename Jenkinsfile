@@ -25,7 +25,7 @@ pipeline {
         IP_TEST_V19 = "158.69.210.128"
         BACKUP_DIR_REMOTE = "/opt/backup_integralis"
 
-        ODOO_LOCAL_URL = "https://tu-url-ngrok.ngrok-free.app" // <--- ¡VERIFICA TU NGROK!
+        ODOO_LOCAL_URL = "https://faceable-maddison-unharangued.ngrok-free.dev" // <--- ¡VERIFICA TU NGROK!
         ODOO_LOCAL_DB = "prueba"
         ODOO_LOCAL_PASS = credentials('odoo-local-api-key') 
     }
