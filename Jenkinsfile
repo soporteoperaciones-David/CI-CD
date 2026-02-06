@@ -46,36 +46,35 @@ pipeline {
         stage('Conectar VPN y Descargar') {
             steps {
                 script {
-                    echo "--- Inyectando Archivo Secreto (Método Seguro) ---"
+                    echo "--- Configurando VPN (Modo Debug) ---"
                     
                     withCredentials([file(credentialsId: 'vpn-pasante-config', variable: 'VPN_PATH_TEMP')]) {
                         
-                        // CORRECCIÓN 1: Usamos comillas SIMPLES '...' para el comando sh.
-                        // Esto elimina el Warning y asegura que la ruta llegue intacta.
-                        // CORRECCIÓN 2: Usamos 'cat' en vez de 'cp' para crear un archivo nuevo limpio.
-                        sh 'cat "$VPN_PATH_TEMP" > ./pasante.ovpn'
+                        // 1. Usamos RUTA ABSOLUTA en /tmp para evitar confusiones de carpetas
+                        sh 'cat "$VPN_PATH_TEMP" > /tmp/pasante.ovpn'
+                        sh 'chmod 644 /tmp/pasante.ovpn'
                         
-                        // CORRECCIÓN 3: Permisos 644 (Lectura universal). 
-                        // A veces OpenVPN falla con 600 si intenta cambiar de usuario internamente.
-                        sh 'chmod 644 ./pasante.ovpn'
+                        // 2. INICIAR VPN CON LOG
+                        // --log: Guarda los errores en un archivo
+                        // --verb 3: Nos da detalles de por qué falla
+                        echo "Iniciando OpenVPN..."
+                        sh 'openvpn --config /tmp/pasante.ovpn --daemon --log /tmp/vpn.log --verb 3'
                         
-                        // Debug
-                        sh 'ls -l ./pasante.ovpn'
+                        echo "Esperando 10 segundos..."
+                        sleep 10
                         
-                        // INICIAR VPN
-                        // Usamos la ruta relativa ./pasante.ovpn que está en el Workspace
-                        sh 'openvpn --config ./pasante.ovpn --daemon'
+                        // 3. MOMENTO DE LA VERDAD: LEER EL LOG
+                        // Esto nos dirá si falta un certificado, si la ruta está mal, o qué pasa.
+                        echo "--- LOG DE OPENVPN ---"
+                        sh 'cat /tmp/vpn.log || echo "No se creó el archivo de log"'
                         
-                        echo "Esperando conexión..."
-                        sleep 15
-                        
-                        // Diagnóstico
-                        sh "ip addr show tun0 || echo '⚠️ La interfaz tun0 no aparece'"
-                        sh "ping -c 2 10.8.0.1 || echo '⚠️ Ping falló, pero intentamos continuar...'"
+                        // 4. Verificaciones estándar
+                        sh "ip addr show tun0 || echo '⚠️ tun0 no existe'"
+                        sh "ping -c 2 10.8.0.1 || echo '⚠️ Ping falló'"
 
-                        // --- EL RESTO DEL CÓDIGO SIGUE IGUAL ---
+                        // ... (El resto del código de descarga sigue igual) ...
                         
-                        // Lógica de Contraseña Maestra
+                        // --- LÓGICA DE CONTRASEÑA MAESTRA ---
                         if (params.ODOO_URL.contains('.sdb-integralis360.com')) {
                             env.MASTER_PWD = credentials('vault-sdb-integralis360.com')
                         } else if (params.ODOO_URL.contains('.dic-integralis360.com')) {
@@ -86,7 +85,7 @@ pipeline {
                             env.MASTER_PWD = credentials('vault-integralis360.website')
                         }
 
-                        // Obtener Nombre BD
+                        // --- OBTENER NOMBRE BD ---
                         def db_response = sh(script: """
                             curl -s -k -X POST "https://${params.ODOO_URL}/web/database/list" \
                             -H "Content-Type: application/json" \
@@ -97,7 +96,7 @@ pipeline {
                         env.DB_NAME = json_db.result[0]
                         echo "Base detectada: ${env.DB_NAME}"
                         
-                        // Descargar
+                        // --- DESCARGAR ---
                         def date = sh(script: "date +%Y%m%d", returnStdout: true).trim()
                         def ext = (params.BACKUP_TYPE == 'zip') ? 'zip' : 'dump'
                         env.BACKUP_FILE = "backup_${env.DB_NAME}-${date}.${ext}"
