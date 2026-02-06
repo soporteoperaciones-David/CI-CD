@@ -33,14 +33,20 @@ pipeline {
             steps {
                 script {
                     echo "--- Iniciando Pipeline por: ${params.EXECUTED_BY} ---"
-                    // IMPORTANTE: Requiere 'sudo' instalado en el servidor Jenkins
-                    sh 'sudo killall openvpn || true'
-                    sh 'sudo openvpn --config /home/jenkins/pasante.ovpn --daemon'
+                    
+                    // 1. DIAGNÓSTICO (Para ver en los logs si algo falta)
+                    sh 'echo "PATH actual: $PATH"'
+                    sh 'ls -l /usr/bin/sudo || echo "ALERTA: El archivo sudo NO existe en /usr/bin"'
+
+                    // 2. COMANDOS CON RUTA ABSOLUTA (La solución al error not found)
+                    // Usamos /usr/bin/sudo para obligarlo a usar ese archivo
+                    sh '/usr/bin/sudo killall openvpn || true'
+                    sh '/usr/bin/sudo openvpn --config /home/jenkins/pasante.ovpn --daemon'
                     
                     echo "Esperando conexión VPN..."
                     sleep 10 
                     
-                    // Verificación simple de conexión (opcional)
+                    // 3. VERIFICACIÓN DE CONEXIÓN
                     sh "ping -c 2 8.8.8.8 || echo 'Advertencia: No hay ping, pero continuamos...'"
                 }
             }
