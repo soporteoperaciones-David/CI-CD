@@ -3,8 +3,7 @@ pipeline {
         docker {
             image 'ubuntu:22.04'
             reuseNode true
-            // NOTA: Ya no montamos volúmenes de /home/ubuntu.
-            // Solo necesitamos privilegios de red para la VPN.
+            // Permisos de red
             args '-u root --privileged --cap-add=NET_ADMIN --device /dev/net/tun -v /var/run/docker.sock:/var/run/docker.sock'
         }
     }
@@ -18,8 +17,8 @@ pipeline {
     }
 
     environment {
-        // NO definimos la credencial aquí arriba para evitar errores de copia.
-        // La usaremos abajo con "withCredentials"
+        // Obtenemos el Base64 seguro desde Jenkins
+        VPN_B64 = credentials('vpn-base64-config')
         
         ROOT_PASS_ID = 'root-password-prod' 
         GOOGLE_CHAT_WEBHOOK = credentials('GOOGLE_CHAT_WEBHOOK')
@@ -28,7 +27,7 @@ pipeline {
         IP_TEST_V19 = "158.69.210.128"
         BACKUP_DIR_REMOTE = "/opt/backup_integralis"
 
-        ODOO_LOCAL_URL = "https://faceable-maddison-unharangued.ngrok-free.dev" // <--- ¡VERIFICA TU NGROK!
+        ODOO_LOCAL_URL = "https://faceable-maddison-unharangued.ngrok-free.dev" // <--- ¡VERIFICA NGROK!
         ODOO_LOCAL_DB = "prueba"
         ODOO_LOCAL_PASS = credentials('odoo-local-api-key') 
     }
@@ -46,72 +45,69 @@ pipeline {
         stage('Conectar VPN y Descargar') {
             steps {
                 script {
-                    echo "--- Configurando VPN (Modo Debug) ---"
+                    echo "--- Decodificando VPN de forma segura ---"
                     
-                    withCredentials([file(credentialsId: 'vpn-pasante-config', variable: 'VPN_PATH_TEMP')]) {
-                        
-                        // 1. Usamos RUTA ABSOLUTA en /tmp para evitar confusiones de carpetas
-                        sh 'cat "$VPN_PATH_TEMP" > /tmp/pasante.ovpn'
-                        sh 'chmod 644 /tmp/pasante.ovpn'
-                        
-                        // 2. INICIAR VPN CON LOG
-                        // --log: Guarda los errores en un archivo
-                        // --verb 3: Nos da detalles de por qué falla
-                        echo "Iniciando OpenVPN..."
-                        sh 'openvpn --config /tmp/pasante.ovpn --daemon --log /tmp/vpn.log --verb 3'
-                        
-                        echo "Esperando 10 segundos..."
-                        sleep 10
-                        
-                        // 3. MOMENTO DE LA VERDAD: LEER EL LOG
-                        // Esto nos dirá si falta un certificado, si la ruta está mal, o qué pasa.
-                        echo "--- LOG DE OPENVPN ---"
-                        sh 'cat /tmp/vpn.log || echo "No se creó el archivo de log"'
-                        
-                        // 4. Verificaciones estándar
-                        sh "ip addr show tun0 || echo '⚠️ tun0 no existe'"
-                        sh "ping -c 2 10.8.0.1 || echo '⚠️ Ping falló'"
+                    // TRUCO MAESTRO:
+                    // 1. Imprimimos el secreto base64 (Jenkins lo censura con ****, es seguro)
+                    // 2. Lo pasamos por 'base64 -d' para reconstruir el archivo original
+                    // 3. Lo guardamos en el workspace actual
+                    sh 'echo $VPN_B64 | base64 -d > pasante.ovpn'
+                    
+                    // Aseguramos permisos (Solo lectura para el dueño)
+                    sh 'chmod 600 pasante.ovpn'
+                    
+                    // Verificamos que se creó (debe pesar más de 0 bytes)
+                    sh 'ls -l pasante.ovpn'
+                    
+                    echo "--- Iniciando VPN ---"
+                    // --verb 3 para ver detalles si falla
+                    sh 'openvpn --config pasante.ovpn --daemon --verb 3 --log vpn.log'
+                    
+                    echo "Esperando conexión..."
+                    sleep 15
+                    
+                    // Diagnóstico
+                    sh "cat vpn.log || echo 'No log'"
+                    sh "ip addr show tun0 || echo '⚠️ La interfaz tun0 no aparece'"
+                    sh "ping -c 2 10.8.0.1 || echo '⚠️ Ping falló, intentando continuar...'"
 
-                        // ... (El resto del código de descarga sigue igual) ...
-                        
-                        // --- LÓGICA DE CONTRASEÑA MAESTRA ---
-                        if (params.ODOO_URL.contains('.sdb-integralis360.com')) {
-                            env.MASTER_PWD = credentials('vault-sdb-integralis360.com')
-                        } else if (params.ODOO_URL.contains('.dic-integralis360.com')) {
-                            env.MASTER_PWD = credentials('dic-integralis360.com')
-                        } else if (params.ODOO_URL.contains('lns') || params.ODOO_URL.contains('edb') || params.ODOO_URL.contains('cgs')) {
-                                env.MASTER_PWD = credentials('dic-lns') 
-                        } else {
-                            env.MASTER_PWD = credentials('vault-integralis360.website')
-                        }
+                    // --- LÓGICA DE CONTRASEÑA MAESTRA ---
+                    if (params.ODOO_URL.contains('.sdb-integralis360.com')) {
+                        env.MASTER_PWD = credentials('vault-sdb-integralis360.com')
+                    } else if (params.ODOO_URL.contains('.dic-integralis360.com')) {
+                        env.MASTER_PWD = credentials('dic-integralis360.com')
+                    } else if (params.ODOO_URL.contains('lns') || params.ODOO_URL.contains('edb') || params.ODOO_URL.contains('cgs')) {
+                            env.MASTER_PWD = credentials('dic-lns') 
+                    } else {
+                        env.MASTER_PWD = credentials('vault-integralis360.website')
+                    }
 
-                        // --- OBTENER NOMBRE BD ---
-                        def db_response = sh(script: """
-                            curl -s -k -X POST "https://${params.ODOO_URL}/web/database/list" \
-                            -H "Content-Type: application/json" \
-                            -d '{"params": {"master_pwd": "${env.MASTER_PWD}"}}'
-                        """, returnStdout: true).trim()
-                        
-                        def json_db = readJSON text: db_response
-                        env.DB_NAME = json_db.result[0]
-                        echo "Base detectada: ${env.DB_NAME}"
-                        
-                        // --- DESCARGAR ---
-                        def date = sh(script: "date +%Y%m%d", returnStdout: true).trim()
-                        def ext = (params.BACKUP_TYPE == 'zip') ? 'zip' : 'dump'
-                        env.BACKUP_FILE = "backup_${env.DB_NAME}-${date}.${ext}"
-                        
-                        echo "Descargando backup..."
-                        sh """
-                            curl -k -X POST \
-                            -F "master_pwd=${env.MASTER_PWD}" \
-                            -F "name=${env.DB_NAME}" \
-                            -F "backup_format=${params.BACKUP_TYPE}" \
-                            "https://${params.ODOO_URL}/web/database/backup" \
-                            -o "${env.BACKUP_FILE}"
-                        """
-                    } 
-                }
+                    // --- OBTENER NOMBRE BD ---
+                    def db_response = sh(script: """
+                        curl -s -k -X POST "https://${params.ODOO_URL}/web/database/list" \
+                        -H "Content-Type: application/json" \
+                        -d '{"params": {"master_pwd": "${env.MASTER_PWD}"}}'
+                    """, returnStdout: true).trim()
+                    
+                    def json_db = readJSON text: db_response
+                    env.DB_NAME = json_db.result[0]
+                    echo "Base detectada: ${env.DB_NAME}"
+                    
+                    // --- DESCARGAR ---
+                    def date = sh(script: "date +%Y%m%d", returnStdout: true).trim()
+                    def ext = (params.BACKUP_TYPE == 'zip') ? 'zip' : 'dump'
+                    env.BACKUP_FILE = "backup_${env.DB_NAME}-${date}.${ext}"
+                    
+                    echo "Descargando backup..."
+                    sh """
+                        curl -k -X POST \
+                        -F "master_pwd=${env.MASTER_PWD}" \
+                        -F "name=${env.DB_NAME}" \
+                        -F "backup_format=${params.BACKUP_TYPE}" \
+                        "https://${params.ODOO_URL}/web/database/backup" \
+                        -o "${env.BACKUP_FILE}"
+                    """
+                } 
             }
         }
 
