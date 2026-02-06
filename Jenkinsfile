@@ -46,25 +46,25 @@ pipeline {
         stage('Conectar VPN y Descargar') {
             steps {
                 script {
-                    echo "--- Inyectando Archivo Secreto ---"
+                    echo "--- Inyectando Archivo Secreto (Método Seguro) ---"
                     
-                    // ESTA ES LA CLAVE DEL ÉXITO:
-                    // 'file' toma el archivo secreto 'vpn-pasante-config' y lo pone en una ruta temporal.
-                    // Esa ruta se guarda en la variable 'VPN_PATH_TEMP'.
                     withCredentials([file(credentialsId: 'vpn-pasante-config', variable: 'VPN_PATH_TEMP')]) {
                         
-                        // 1. Copiamos el archivo temporal a una ruta conocida con la extensión correcta (.ovpn)
-                        //    Jenkins a veces le pone nombres raros sin extensión.
-                        sh "cp \"$VPN_PATH_TEMP\" /tmp/pasante.ovpn"
+                        // CORRECCIÓN 1: Usamos comillas SIMPLES '...' para el comando sh.
+                        // Esto elimina el Warning y asegura que la ruta llegue intacta.
+                        // CORRECCIÓN 2: Usamos 'cat' en vez de 'cp' para crear un archivo nuevo limpio.
+                        sh 'cat "$VPN_PATH_TEMP" > ./pasante.ovpn'
                         
-                        // 2. Aseguramos permisos (root ya los tiene, pero por si acaso)
-                        sh "chmod 600 /tmp/pasante.ovpn"
+                        // CORRECCIÓN 3: Permisos 644 (Lectura universal). 
+                        // A veces OpenVPN falla con 600 si intenta cambiar de usuario internamente.
+                        sh 'chmod 644 ./pasante.ovpn'
                         
-                        // 3. Verificamos que existe (Debug)
-                        sh "ls -l /tmp/pasante.ovpn"
+                        // Debug
+                        sh 'ls -l ./pasante.ovpn'
                         
-                        // 4. INICIAR VPN
-                        sh "openvpn --config /tmp/pasante.ovpn --daemon"
+                        // INICIAR VPN
+                        // Usamos la ruta relativa ./pasante.ovpn que está en el Workspace
+                        sh 'openvpn --config ./pasante.ovpn --daemon'
                         
                         echo "Esperando conexión..."
                         sleep 15
@@ -73,7 +73,9 @@ pipeline {
                         sh "ip addr show tun0 || echo '⚠️ La interfaz tun0 no aparece'"
                         sh "ping -c 2 10.8.0.1 || echo '⚠️ Ping falló, pero intentamos continuar...'"
 
-                        // --- LÓGICA DE CONTRASEÑA MAESTRA ---
+                        // --- EL RESTO DEL CÓDIGO SIGUE IGUAL ---
+                        
+                        // Lógica de Contraseña Maestra
                         if (params.ODOO_URL.contains('.sdb-integralis360.com')) {
                             env.MASTER_PWD = credentials('vault-sdb-integralis360.com')
                         } else if (params.ODOO_URL.contains('.dic-integralis360.com')) {
@@ -84,7 +86,7 @@ pipeline {
                             env.MASTER_PWD = credentials('vault-integralis360.website')
                         }
 
-                        // --- OBTENER NOMBRE BD ---
+                        // Obtener Nombre BD
                         def db_response = sh(script: """
                             curl -s -k -X POST "https://${params.ODOO_URL}/web/database/list" \
                             -H "Content-Type: application/json" \
@@ -95,7 +97,7 @@ pipeline {
                         env.DB_NAME = json_db.result[0]
                         echo "Base detectada: ${env.DB_NAME}"
                         
-                        // --- DESCARGAR ---
+                        // Descargar
                         def date = sh(script: "date +%Y%m%d", returnStdout: true).trim()
                         def ext = (params.BACKUP_TYPE == 'zip') ? 'zip' : 'dump'
                         env.BACKUP_FILE = "backup_${env.DB_NAME}-${date}.${ext}"
@@ -109,7 +111,7 @@ pipeline {
                             "https://${params.ODOO_URL}/web/database/backup" \
                             -o "${env.BACKUP_FILE}"
                         """
-                    } // Fin del bloque withCredentials (El archivo temporal se borra aquí automáticamente por seguridad)
+                    } 
                 }
             }
         }
