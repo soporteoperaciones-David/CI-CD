@@ -1,5 +1,5 @@
 pipeline {
-    agent any // Ejecutamos Docker desde el Host
+    agent any 
 
     parameters {
         string(name: 'ODOO_URL', defaultValue: '', description: 'URL de producción')
@@ -10,7 +10,7 @@ pipeline {
     }
 
     environment {
-        // RUTA EN EL HOST FÍSICO (Asegúrate que existe)
+        // RUTA EN EL HOST FÍSICO 
         HOST_VPN_FILE = "/home/ubuntu/pasante.ovpn"
         
         // Credenciales
@@ -33,20 +33,32 @@ pipeline {
                     echo "--- Limpiando contenedores viejos ---"
                     sh "docker rm -f vpn-sidecar || true"
 
+                    echo "--- Preparando archivo de configuración ---"
+                    // TRUCO DE SEGURIDAD:
+                    // Copiamos el archivo del host al workspace actual para asegurar que Docker lo pueda leer
+                    // sin problemas de permisos o rutas absolutas extrañas.
+                    sh "cp ${env.HOST_VPN_FILE} ./vpn_config.ovpn"
+                    sh "chmod 644 ./vpn_config.ovpn"
+
                     echo "--- Arrancando Contenedor VPN (Sidecar) ---"
-                    // Iniciamos el contenedor que mantendrá el túnel abierto
+                    // Montamos el archivo desde el WORKSPACE (${WORKSPACE}/vpn_config.ovpn)
+                    // Agregamos 'cat' antes de openvpn para verificar que el archivo se lee bien
                     sh """
                         docker run -d --name vpn-sidecar \
                         --cap-add=NET_ADMIN --device /dev/net/tun \
-                        -v ${env.HOST_VPN_FILE}:/vpn/config.ovpn \
+                        -v ${WORKSPACE}/vpn_config.ovpn:/vpn/config.ovpn \
                         ubuntu:22.04 \
-                        sh -c "apt-get update && apt-get install -y openvpn && openvpn --config /vpn/config.ovpn"
+                        sh -c "apt-get update && apt-get install -y openvpn && \
+                               echo '--- CONTENIDO DEL ARCHIVO (DEBUG) ---' && \
+                               cat /vpn/config.ovpn && \
+                               echo '--- INICIANDO OPENVPN ---' && \
+                               openvpn --config /vpn/config.ovpn"
                     """
                     
                     echo "--- Esperando conexión (15s) ---"
                     sleep 15
                     
-                    // Verificamos logs (solo para debug)
+                    // Verificamos logs para confirmar que arrancó
                     sh "docker logs vpn-sidecar"
                 }
             }
@@ -55,9 +67,9 @@ pipeline {
         stage('2. Descargar Backup (Vía VPN)') {
             steps {
                 script {
-                    echo "--- Iniciando Worker de Descarga ---"
+                    echo "--- Generando Script de Descarga ---"
                     
-                    // Lógica de Passwords
+                    // PREPARAR CREDENCIALES
                     if (params.ODOO_URL.contains('.sdb-integralis360.com')) {
                         env.MASTER_PWD = credentials('vault-sdb-integralis360.com')
                     } else if (params.ODOO_URL.contains('.dic-integralis360.com')) {
@@ -68,46 +80,54 @@ pipeline {
                         env.MASTER_PWD = credentials('vault-integralis360.website')
                     }
 
-                    // SCRIPT DE DESCARGA
-                    def download_cmds = """
-                        apt-get update -qq && apt-get install -y curl python3 -qq
-                        
-                        # Verificación de IP (Debug)
-                        ifconfig tun0 || ip addr show tun0 || echo '⚠️ Tun0 no visible'
+                    // SOLUCIÓN AL ERROR DE SINTAXIS:
+                    // Creamos el script en un archivo físico en lugar de pasarlo por comando.
+                    // Esto evita conflictos con comillas dobles y paréntesis.
+                    def scriptContent = """#!/bin/bash
+                            set -e
+                            apt-get update -qq && apt-get install -y curl python3 -qq
 
-                        echo '--- Consultando Odoo ---'
-                        DB_JSON=\$(curl -s -k -X POST "https://${params.ODOO_URL}/web/database/list" \
-                            -H "Content-Type: application/json" \
-                            -d '{"params": {"master_pwd": "${env.MASTER_PWD}"}}')
-                        
-                        DB_NAME=\$(echo \$DB_JSON | python3 -c "import sys, json; print(json.load(sys.stdin)['result'][0])")
-                        echo "Base detectada: \$DB_NAME"
-                        
-                        DATE=\$(date +%Y%m%d)
-                        EXT="${params.BACKUP_TYPE == 'zip' ? 'zip' : 'dump'}"
-                        FILENAME="backup_\${DB_NAME}-\${DATE}.\${EXT}"
-                        
-                        echo '--- Descargando ---'
-                        curl -k -X POST \
-                            -F "master_pwd=${env.MASTER_PWD}" \
-                            -F "name=\$DB_NAME" \
-                            -F "backup_format=${params.BACKUP_TYPE}" \
-                            "https://${params.ODOO_URL}/web/database/backup" \
-                            -o "/workspace/\$FILENAME"
-                            
-                        # Guardamos datos para el siguiente stage
-                        echo "\$FILENAME" > /workspace/filename.txt
-                        echo "\$DB_NAME" > /workspace/dbname.txt
-                        chmod 666 "/workspace/\$FILENAME"
+                            echo '--- Verificando IP (Debe ser la de la VPN) ---'
+                            ifconfig tun0 || ip addr show tun0 || echo '⚠️ No veo tun0 (Error de red)'
+
+                            echo '--- Consultando Odoo ---'
+                            DB_JSON=\$(curl -s -k -X POST "https://${params.ODOO_URL}/web/database/list" \
+                                -H "Content-Type: application/json" \
+                                -d '{"params": {"master_pwd": "${env.MASTER_PWD}"}}')
+
+                            # Aquí estaba el error de comillas antes. Ahora es seguro.
+                            DB_NAME=\$(echo "\$DB_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin)['result'][0])")
+                            echo "Base detectada: \$DB_NAME"
+
+                            DATE=\$(date +%Y%m%d)
+                            EXT="${params.BACKUP_TYPE == 'zip' ? 'zip' : 'dump'}"
+                            FILENAME="backup_\${DB_NAME}-\${DATE}.\${EXT}"
+
+                            echo '--- Descargando ---'
+                            curl -k -X POST \
+                                -F "master_pwd=${env.MASTER_PWD}" \
+                                -F "name=\$DB_NAME" \
+                                -F "backup_format=${params.BACKUP_TYPE}" \
+                                "https://${params.ODOO_URL}/web/database/backup" \
+                                -o "/workspace/\$FILENAME"
+
+                            # Guardar metadatos
+                            echo "\$FILENAME" > /workspace/filename.txt
+                            echo "\$DB_NAME" > /workspace/dbname.txt
+                            chmod 666 "/workspace/\$FILENAME"
                     """
+                    // Escribimos el script en el disco
+                    writeFile file: 'download_script.sh', text: scriptContent
+                    sh "chmod +x download_script.sh"
 
-                    // EJECUTAMOS EL WORKER 1
+                    echo "--- Ejecutando Worker ---"
+                    // Ejecutamos el script montado
                     sh """
                         docker run --rm \
                         --network container:vpn-sidecar \
                         -v ${WORKSPACE}:/workspace \
                         ubuntu:22.04 \
-                        sh -c "${download_cmds}"
+                        /workspace/download_script.sh
                     """
                 }
             }
@@ -116,9 +136,8 @@ pipeline {
         stage('3. Enviar y Restaurar (Vía VPN)') {
             steps {
                 script {
-                    echo "--- Preparando envío por túnel VPN ---"
+                    echo "--- Generando Script de Restore ---"
                     
-                    // Leemos variables guardadas por el paso anterior
                     env.LOCAL_BACKUP_FILE = readFile('filename.txt').trim()
                     env.DB_NAME = readFile('dbname.txt').trim()
                     env.NEW_DB_NAME = "${env.DB_NAME}-" + sh(returnStdout: true, script: 'date +%Y%m%d').trim() + "-" + ((params.VERSION == 'v15') ? 'ee15n2' : 'ee19')
@@ -134,16 +153,15 @@ pipeline {
 
                     withCredentials([string(credentialsId: env.ROOT_PASS_ID, variable: 'ROOT_PASS')]) {
                         
-                        // SCRIPT DE RESTAURACIÓN (Se ejecutará DENTRO del contenedor VPN)
-                        // Nota: SSHPASS debe instalarse aquí adentro porque es un contenedor nuevo
-                        def deploy_cmds = """
+                        // Script de deploy también en archivo físico
+                        def deployContent = """#!/bin/bash
+                            set -e
                             apt-get update -qq && apt-get install -y sshpass openssh-client curl -qq
-                            
+
                             echo '--- Enviando archivo por SCP (Tunel VPN) ---'
                             sshpass -p '${ROOT_PASS}' scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} root@${target_ip}:${env.BACKUP_DIR_REMOTE}/
 
                             echo '--- Ejecutando restauración remota ---'
-                            # Nos conectamos por SSH (a través de la VPN) para dar las órdenes al VPS destino
                             sshpass -p '${ROOT_PASS}' ssh -o StrictHostKeyChecking=no root@${target_ip} '
                                 update-alternatives --set psql /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/psql
                                 update-alternatives --set pg_dump /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_dump
@@ -158,16 +176,16 @@ pipeline {
                                 
                                 rm -f ${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}
                             '
-                        """
+                            """
+                        writeFile file: 'deploy_script.sh', text: deployContent
+                        sh "chmod +x deploy_script.sh"
 
-                        // EJECUTAMOS EL WORKER 2 (Conectado a la misma VPN)
                         sh """
                             docker run --rm \
                             --network container:vpn-sidecar \
-                            -e ROOT_PASS='${ROOT_PASS}' \
                             -v ${WORKSPACE}:/workspace \
                             ubuntu:22.04 \
-                            sh -c "${deploy_cmds}"
+                            /workspace/deploy_script.sh
                         """
                     }
                 }
@@ -177,12 +195,23 @@ pipeline {
         stage('Notificar') {
             steps {
                 script {
-                    // Notificación sale por Internet normal del Host (no hace falta VPN)
-                    def chat_msg = """{"text": "*Respaldo Completado*\\n*Base:* ${env.NEW_DB_NAME}\\n*URL:* ${env.FINAL_URL}"}"""
+                    def chat_msg = """{"text": "✅ *Respaldo Completado*\\n*Base:* ${env.NEW_DB_NAME}\\n*URL:* ${env.FINAL_URL}"}"""
                     sh "curl -X POST -H 'Content-Type: application/json; charset=UTF-8' -d '${chat_msg}' '${env.GOOGLE_CHAT_WEBHOOK}' || true"
 
-                    // Si necesitas notificar al Odoo Local, y ese Odoo Local NO requiere VPN, 
-                    // puedes hacerlo aquí directo desde el host.
+                    def odoo_payload = """
+                    {
+                        "jsonrpc": "2.0", "method": "call",
+                        "params": {
+                            "service": "object", "method": "execute_kw",
+                            "args": [
+                                "${env.ODOO_LOCAL_DB}", 2, "${env.ODOO_LOCAL_PASS}",
+                                "backup.automation", "write",
+                                [[${params.ODOO_ID}], {"state": "done", "result_url": "${env.FINAL_URL}", "jenkins_log": "Exito"}]
+                            ]
+                        }
+                    }
+                    """
+                    sh "curl -X POST -H 'Content-Type: application/json' -d '${odoo_payload}' '${env.ODOO_LOCAL_URL}/jsonrpc'"
                 }
             }
         }
@@ -190,7 +219,7 @@ pipeline {
 
     post {
         always {
-            echo "--- Limpiando Sidecar VPN ---"
+            echo "--- Limpiando Sidecar ---"
             sh "docker rm -f vpn-sidecar || true"
             cleanWs()
         }
