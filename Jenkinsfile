@@ -10,7 +10,7 @@ pipeline {
     }
 
     environment {
-        // RUTA EN EL HOST FÍSICO 
+        // RUTA REAL EN EL SERVIDOR FÍSICO
         HOST_VPN_FILE = "/home/ubuntu/pasante.ovpn"
         
         // Credenciales
@@ -21,7 +21,7 @@ pipeline {
         IP_TEST_V19 = "158.69.210.128"
         BACKUP_DIR_REMOTE = "/opt/backup_integralis"
         
-        ODOO_LOCAL_URL = "https://faceable-maddison-unharangued.ngrok-free.dev" 
+        ODOO_LOCAL_URL = "https://tu-url-ngrok.ngrok-free.app" 
         ODOO_LOCAL_DB = "prueba"
         ODOO_LOCAL_PASS = credentials('odoo-local-api-key') 
     }
@@ -33,32 +33,25 @@ pipeline {
                     echo "--- Limpiando contenedores viejos ---"
                     sh "docker rm -f vpn-sidecar || true"
 
-                    echo "--- Preparando archivo de configuración ---"
-                    // TRUCO DE SEGURIDAD:
-                    // Copiamos el archivo del host al workspace actual para asegurar que Docker lo pueda leer
-                    // sin problemas de permisos o rutas absolutas extrañas.
-                    sh "cp ${env.HOST_VPN_FILE} ./vpn_config.ovpn"
-                    sh "chmod 644 ./vpn_config.ovpn"
-
                     echo "--- Arrancando Contenedor VPN (Sidecar) ---"
-                    // Montamos el archivo desde el WORKSPACE (${WORKSPACE}/vpn_config.ovpn)
-                    // Agregamos 'cat' antes de openvpn para verificar que el archivo se lee bien
+                    
+                    // CORRECCIÓN 1: Eliminamos el 'cp'. 
+                    // Montamos directamente la ruta del HOST (${env.HOST_VPN_FILE}) al contenedor.
+                    // Docker (root) sí podrá leer el archivo.
                     sh """
                         docker run -d --name vpn-sidecar \
                         --cap-add=NET_ADMIN --device /dev/net/tun \
-                        -v ${WORKSPACE}/vpn_config.ovpn:/vpn/config.ovpn \
+                        -v ${env.HOST_VPN_FILE}:/vpn/config.ovpn \
                         ubuntu:22.04 \
                         sh -c "apt-get update && apt-get install -y openvpn && \
-                               echo '--- CONTENIDO DEL ARCHIVO (DEBUG) ---' && \
-                               cat /vpn/config.ovpn && \
-                               echo '--- INICIANDO OPENVPN ---' && \
+                               echo '--- Iniciando OpenVPN ---' && \
                                openvpn --config /vpn/config.ovpn"
                     """
                     
                     echo "--- Esperando conexión (15s) ---"
                     sleep 15
                     
-                    // Verificamos logs para confirmar que arrancó
+                    // Verificamos logs para confirmar
                     sh "docker logs vpn-sidecar"
                 }
             }
@@ -69,7 +62,7 @@ pipeline {
                 script {
                     echo "--- Generando Script de Descarga ---"
                     
-                    // PREPARAR CREDENCIALES
+                    // Lógica de Passwords
                     if (params.ODOO_URL.contains('.sdb-integralis360.com')) {
                         env.MASTER_PWD = credentials('vault-sdb-integralis360.com')
                     } else if (params.ODOO_URL.contains('.dic-integralis360.com')) {
@@ -80,48 +73,44 @@ pipeline {
                         env.MASTER_PWD = credentials('vault-integralis360.website')
                     }
 
-                    // SOLUCIÓN AL ERROR DE SINTAXIS:
-                    // Creamos el script en un archivo físico en lugar de pasarlo por comando.
-                    // Esto evita conflictos con comillas dobles y paréntesis.
+                    // CORRECCIÓN 2: Sintaxis Python corregida (escapando comillas y $)
                     def scriptContent = """#!/bin/bash
-                            set -e
-                            apt-get update -qq && apt-get install -y curl python3 -qq
+set -e
+apt-get update -qq && apt-get install -y curl python3 -qq
 
-                            echo '--- Verificando IP (Debe ser la de la VPN) ---'
-                            ifconfig tun0 || ip addr show tun0 || echo '⚠️ No veo tun0 (Error de red)'
+echo '--- Verificando conexión VPN ---'
+ifconfig tun0 || ip addr show tun0 || echo '⚠️ No veo tun0'
 
-                            echo '--- Consultando Odoo ---'
-                            DB_JSON=\$(curl -s -k -X POST "https://${params.ODOO_URL}/web/database/list" \
-                                -H "Content-Type: application/json" \
-                                -d '{"params": {"master_pwd": "${env.MASTER_PWD}"}}')
+echo '--- Consultando Odoo ---'
+DB_JSON=\$(curl -s -k -X POST "https://${params.ODOO_URL}/web/database/list" \
+    -H "Content-Type: application/json" \
+    -d '{"params": {"master_pwd": "${env.MASTER_PWD}"}}')
 
-                            # Aquí estaba el error de comillas antes. Ahora es seguro.
-                            DB_NAME=\$(echo "\$DB_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin)['result'][0])")
-                            echo "Base detectada: \$DB_NAME"
+# AQUÍ ESTABA EL ERROR: Usamos sintaxis limpia para extraer el nombre
+DB_NAME=\$(echo "\$DB_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin)['result'][0])")
+echo "Base detectada: \$DB_NAME"
 
-                            DATE=\$(date +%Y%m%d)
-                            EXT="${params.BACKUP_TYPE == 'zip' ? 'zip' : 'dump'}"
-                            FILENAME="backup_\${DB_NAME}-\${DATE}.\${EXT}"
+DATE=\$(date +%Y%m%d)
+EXT="${params.BACKUP_TYPE == 'zip' ? 'zip' : 'dump'}"
+FILENAME="backup_\${DB_NAME}-\${DATE}.\${EXT}"
 
-                            echo '--- Descargando ---'
-                            curl -k -X POST \
-                                -F "master_pwd=${env.MASTER_PWD}" \
-                                -F "name=\$DB_NAME" \
-                                -F "backup_format=${params.BACKUP_TYPE}" \
-                                "https://${params.ODOO_URL}/web/database/backup" \
-                                -o "/workspace/\$FILENAME"
+echo '--- Descargando ---'
+curl -k -X POST \
+    -F "master_pwd=${env.MASTER_PWD}" \
+    -F "name=\$DB_NAME" \
+    -F "backup_format=${params.BACKUP_TYPE}" \
+    "https://${params.ODOO_URL}/web/database/backup" \
+    -o "/workspace/\$FILENAME"
 
-                            # Guardar metadatos
-                            echo "\$FILENAME" > /workspace/filename.txt
-                            echo "\$DB_NAME" > /workspace/dbname.txt
-                            chmod 666 "/workspace/\$FILENAME"
-                    """
-                    // Escribimos el script en el disco
+# Guardar nombres para Jenkins
+echo "\$FILENAME" > /workspace/filename.txt
+echo "\$DB_NAME" > /workspace/dbname.txt
+chmod 666 "/workspace/\$FILENAME"
+"""
                     writeFile file: 'download_script.sh', text: scriptContent
                     sh "chmod +x download_script.sh"
 
                     echo "--- Ejecutando Worker ---"
-                    // Ejecutamos el script montado
                     sh """
                         docker run --rm \
                         --network container:vpn-sidecar \
@@ -153,30 +142,29 @@ pipeline {
 
                     withCredentials([string(credentialsId: env.ROOT_PASS_ID, variable: 'ROOT_PASS')]) {
                         
-                        // Script de deploy también en archivo físico
                         def deployContent = """#!/bin/bash
-                            set -e
-                            apt-get update -qq && apt-get install -y sshpass openssh-client curl -qq
+set -e
+apt-get update -qq && apt-get install -y sshpass openssh-client curl -qq
 
-                            echo '--- Enviando archivo por SCP (Tunel VPN) ---'
-                            sshpass -p '${ROOT_PASS}' scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} root@${target_ip}:${env.BACKUP_DIR_REMOTE}/
+echo '--- Enviando archivo por SCP (Tunel VPN) ---'
+sshpass -p '${ROOT_PASS}' scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} root@${target_ip}:${env.BACKUP_DIR_REMOTE}/
 
-                            echo '--- Ejecutando restauración remota ---'
-                            sshpass -p '${ROOT_PASS}' ssh -o StrictHostKeyChecking=no root@${target_ip} '
-                                update-alternatives --set psql /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/psql
-                                update-alternatives --set pg_dump /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_dump
-                                update-alternatives --set pg_restore /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_restore
-                                
-                                echo "Restaurando ${env.NEW_DB_NAME}..."
-                                curl -k -X POST "http://localhost:8069/web/database/restore" \
-                                    -F "master_pwd=${env.MASTER_PWD}" \
-                                    -F "file=@${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}" \
-                                    -F "name=${env.NEW_DB_NAME}" \
-                                    -F "copy=true"
-                                
-                                rm -f ${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}
-                            '
-                            """
+echo '--- Ejecutando restauración remota ---'
+sshpass -p '${ROOT_PASS}' ssh -o StrictHostKeyChecking=no root@${target_ip} '
+    update-alternatives --set psql /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/psql
+    update-alternatives --set pg_dump /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_dump
+    update-alternatives --set pg_restore /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_restore
+    
+    echo "Restaurando ${env.NEW_DB_NAME}..."
+    curl -k -X POST "http://localhost:8069/web/database/restore" \
+        -F "master_pwd=${env.MASTER_PWD}" \
+        -F "file=@${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}" \
+        -F "name=${env.NEW_DB_NAME}" \
+        -F "copy=true"
+    
+    rm -f ${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}
+'
+"""
                         writeFile file: 'deploy_script.sh', text: deployContent
                         sh "chmod +x deploy_script.sh"
 
