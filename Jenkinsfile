@@ -10,7 +10,8 @@ pipeline {
     }
 
     environment {
-        // RUTA REAL EN EL SERVIDOR FÍSICO
+        // RUTA REAL EN EL SERVIDOR FÍSICO (Host)
+        // Docker la leerá directo del disco, Jenkins no la tocará.
         HOST_VPN_FILE = "/home/ubuntu/pasante.ovpn"
         
         // Credenciales
@@ -21,7 +22,7 @@ pipeline {
         IP_TEST_V19 = "158.69.210.128"
         BACKUP_DIR_REMOTE = "/opt/backup_integralis"
         
-        ODOO_LOCAL_URL = "https://tu-url-ngrok.ngrok-free.app" 
+        ODOO_LOCAL_URL = "https://faceable-maddison-unharangued.ngrok-free.dev" 
         ODOO_LOCAL_DB = "prueba"
         ODOO_LOCAL_PASS = credentials('odoo-local-api-key') 
     }
@@ -35,9 +36,9 @@ pipeline {
 
                     echo "--- Arrancando Contenedor VPN (Sidecar) ---"
                     
-                    // CORRECCIÓN 1: Eliminamos el 'cp'. 
-                    // Montamos directamente la ruta del HOST (${env.HOST_VPN_FILE}) al contenedor.
-                    // Docker (root) sí podrá leer el archivo.
+                    // CORRECCIÓN CLAVE:
+                    // Eliminamos el 'cp'. Usamos ${env.HOST_VPN_FILE} directo en el -v.
+                    // El demonio de Docker en el host SÍ puede leer /home/ubuntu/...
                     sh """
                         docker run -d --name vpn-sidecar \
                         --cap-add=NET_ADMIN --device /dev/net/tun \
@@ -51,7 +52,7 @@ pipeline {
                     echo "--- Esperando conexión (15s) ---"
                     sleep 15
                     
-                    // Verificamos logs para confirmar
+                    // Verificamos logs para confirmar conexión exitosa
                     sh "docker logs vpn-sidecar"
                 }
             }
@@ -62,7 +63,6 @@ pipeline {
                 script {
                     echo "--- Generando Script de Descarga ---"
                     
-                    // Lógica de Passwords
                     if (params.ODOO_URL.contains('.sdb-integralis360.com')) {
                         env.MASTER_PWD = credentials('vault-sdb-integralis360.com')
                     } else if (params.ODOO_URL.contains('.dic-integralis360.com')) {
@@ -73,7 +73,9 @@ pipeline {
                         env.MASTER_PWD = credentials('vault-integralis360.website')
                     }
 
-                    // CORRECCIÓN 2: Sintaxis Python corregida (escapando comillas y $)
+                    // CORRECCIÓN DE SINTAXIS:
+                    // Usamos 'writeFile' para evitar líos de comillas en la terminal.
+                    // Y arreglamos el script de python escapando los signos de dolar ($) necesarios.
                     def scriptContent = """#!/bin/bash
 set -e
 apt-get update -qq && apt-get install -y curl python3 -qq
@@ -86,7 +88,7 @@ DB_JSON=\$(curl -s -k -X POST "https://${params.ODOO_URL}/web/database/list" \
     -H "Content-Type: application/json" \
     -d '{"params": {"master_pwd": "${env.MASTER_PWD}"}}')
 
-# AQUÍ ESTABA EL ERROR: Usamos sintaxis limpia para extraer el nombre
+# Extracción de nombre corregida
 DB_NAME=\$(echo "\$DB_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin)['result'][0])")
 echo "Base detectada: \$DB_NAME"
 
@@ -110,7 +112,7 @@ chmod 666 "/workspace/\$FILENAME"
                     writeFile file: 'download_script.sh', text: scriptContent
                     sh "chmod +x download_script.sh"
 
-                    echo "--- Ejecutando Worker ---"
+                    echo "--- Ejecutando Worker de Descarga ---"
                     sh """
                         docker run --rm \
                         --network container:vpn-sidecar \
@@ -168,6 +170,7 @@ sshpass -p '${ROOT_PASS}' ssh -o StrictHostKeyChecking=no root@${target_ip} '
                         writeFile file: 'deploy_script.sh', text: deployContent
                         sh "chmod +x deploy_script.sh"
 
+                        echo "--- Ejecutando Worker de Restore ---"
                         sh """
                             docker run --rm \
                             --network container:vpn-sidecar \
@@ -185,7 +188,8 @@ sshpass -p '${ROOT_PASS}' ssh -o StrictHostKeyChecking=no root@${target_ip} '
                 script {
                     def chat_msg = """{"text": "✅ *Respaldo Completado*\\n*Base:* ${env.NEW_DB_NAME}\\n*URL:* ${env.FINAL_URL}"}"""
                     sh "curl -X POST -H 'Content-Type: application/json; charset=UTF-8' -d '${chat_msg}' '${env.GOOGLE_CHAT_WEBHOOK}' || true"
-
+                    
+                    // Notificación a Odoo Local (si aplica)
                     def odoo_payload = """
                     {
                         "jsonrpc": "2.0", "method": "call",
