@@ -10,9 +10,11 @@ pipeline {
     }
 
     environment {
-        // --- CREDENCIALES CARGADAS AL INICIO ---
-        // Esto evita el uso de bloques withCredentials complejos
-        SSH_PASS_V15 = credentials('ssh-pass-v15') 
+        // --- CORRECCIÓN AQUÍ ---
+        // Usamos el ID exacto que tienes en la foto: 'root-pass-v15'
+        SSH_PASS_V15 = credentials('root-pass-v15') 
+        
+        // El de la v19 sí se llama 'ssh-pass-v19' según tu imagen
         SSH_PASS_V19 = credentials('ssh-pass-v19')
         
         GOOGLE_CHAT_WEBHOOK = credentials('GOOGLE_CHAT_WEBHOOK')
@@ -39,7 +41,7 @@ pipeline {
                     configFileProvider([configFile(fileId: 'vpn-pasante-file', targetLocation: 'pasante.ovpn')]) {
                         sh "docker run -d --name vpn-sidecar --cap-add=NET_ADMIN --device /dev/net/tun ubuntu:22.04 sleep infinity"
                         
-                        // Instalación en una sola línea para ser más robusto
+                        // Instalación robusta
                         sh "docker exec vpn-sidecar sh -c 'apt-get update && apt-get install -y openvpn iproute2 iputils-ping'"
                         
                         sh "docker cp pasante.ovpn vpn-sidecar:/etc/openvpn/client.conf"
@@ -146,7 +148,6 @@ chmod 666 "/workspace/\$FILENAME"
        stage('3. Enviar y Restaurar (Vía VPN)') {
             steps {
                 script {
-                    // --- 1. PREPARACIÓN DE VARIABLES ---
                     env.LOCAL_BACKUP_FILE = readFile('filename.txt').trim()
                     env.DB_NAME = readFile('dbname.txt').trim()
                     env.NEW_DB_NAME = "${env.DB_NAME}-" + sh(returnStdout: true, script: 'date +%Y%m%d').trim() + "-" + ((params.VERSION == 'v15') ? 'ee15n2' : 'ee19')
@@ -157,11 +158,10 @@ chmod 666 "/workspace/\$FILENAME"
                         if (env.DB_NAME.contains('edb') || env.DB_NAME.contains('cgs')) { env.PG_BIN_VERSION = "17" }
                     }
 
-                    // --- 2. SELECCIÓN DE CREDENCIALES ---
-                    // IMPORTANTE: Asignamos valores a variables env globales para evitar error de compilación
+                    // --- SELECCIÓN DE CREDENCIALES ---
                     if (params.VERSION == 'v15') {
                         env.TARGET_IP_FINAL = env.IP_TEST_V15
-                        env.SELECTED_PASS = env.SSH_PASS_V15
+                        env.SELECTED_PASS = env.SSH_PASS_V15 // Esto cargará 'root-pass-v15'
                     } else {
                         env.TARGET_IP_FINAL = env.IP_TEST_V19
                         env.SELECTED_PASS = env.SSH_PASS_V19
@@ -172,20 +172,14 @@ chmod 666 "/workspace/\$FILENAME"
                     echo "--- DEBUG INFO ---"
                     echo "IP: ${env.TARGET_IP_FINAL}"
 
-                    // --- 3. EJECUCIÓN (Corrección de Sintaxis) ---
-                    // Usamos sh """ ... """ y referenciamos todo con ${env.VAR}
-                    
+                    // --- EJECUCIÓN ---
                     sh """
-                        # Creamos el script deploy.sh usando CAT
-                        # Nota: Usamos las variables de entorno de Jenkins (${env.VAR})
-                        
                         cat <<EOF > deploy.sh
 #!/bin/bash
 set -e
 apt-get update -qq && apt-get install -y sshpass openssh-client curl -qq
 
 echo "--- Subiendo archivo a ${env.TARGET_IP_FINAL} ---"
-# Leemos la variable de entorno \$MY_SSH_PASS que inyectaremos en Docker
 sshpass -p "\$MY_SSH_PASS" scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} ubuntu@${env.TARGET_IP_FINAL}:/home/ubuntu/
 
 echo "--- Ejecutando comandos remotos ---"
@@ -216,7 +210,6 @@ EOF
                         echo "--- Ejecutando Docker ---"
                         docker rm -f vpn-deploy || true
                         
-                        # Inyectamos la contraseña seleccionada como variable de entorno
                         docker run -d --name vpn-deploy \\
                             -e MY_SSH_PASS="${env.SELECTED_PASS}" \\
                             --network container:vpn-sidecar \\
@@ -226,7 +219,6 @@ EOF
                         docker cp deploy.sh vpn-deploy:/workspace/
                         docker cp ${env.LOCAL_BACKUP_FILE} vpn-deploy:/workspace/
                         
-                        # Ejecutamos
                         docker exec vpn-deploy /workspace/deploy.sh
                             
                         docker rm -f vpn-deploy
