@@ -161,7 +161,7 @@ chmod 666 "/workspace/\$FILENAME"
                     // --- SELECCIÓN DE CREDENCIALES ---
                     if (params.VERSION == 'v15') {
                         env.TARGET_IP_FINAL = env.IP_TEST_V15
-                        env.SELECTED_PASS = env.SSH_PASS_V15 // Esto cargará 'root-pass-v15'
+                        env.SELECTED_PASS = env.SSH_PASS_V15 
                     } else {
                         env.TARGET_IP_FINAL = env.IP_TEST_V19
                         env.SELECTED_PASS = env.SSH_PASS_V19
@@ -179,11 +179,17 @@ chmod 666 "/workspace/\$FILENAME"
 set -e
 apt-get update -qq && apt-get install -y sshpass openssh-client curl -qq
 
+# --- CORRECCIÓN IMPORTANTE ---
+# Exportamos la variable SSHPASS. sshpass buscará aquí la contraseña automáticamente.
+# Esto evita que los caracteres especiales ($, !, @) rompan el comando.
+export SSHPASS="\$MY_SSH_PASS"
+
 echo "--- Subiendo archivo a ${env.TARGET_IP_FINAL} ---"
-sshpass -p "\$MY_SSH_PASS" scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} ubuntu@${env.TARGET_IP_FINAL}:/home/ubuntu/
+# Usamos '-e' para que lea la variable de entorno SSHPASS
+sshpass -e scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} ubuntu@${env.TARGET_IP_FINAL}:/home/ubuntu/
 
 echo "--- Ejecutando comandos remotos ---"
-sshpass -p "\$MY_SSH_PASS" ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_FINAL} '
+sshpass -e ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_FINAL} '
     echo "Moviendo archivo..."
     sudo mv /home/ubuntu/${env.LOCAL_BACKUP_FILE} ${env.BACKUP_DIR_REMOTE}/
     sudo chmod 644 ${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}
