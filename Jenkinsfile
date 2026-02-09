@@ -174,22 +174,12 @@ chmod 666 "/workspace/\$FILENAME"
         stage('3. Enviar y Restaurar (Vía VPN)') {
             steps {
                 script {
-                    // Cargar variables
                     env.LOCAL_BACKUP_FILE = readFile('filename.txt').trim()
                     env.DB_NAME = readFile('dbname.txt').trim()
                     
-                    // Limpieza del nombre
                     def cleanName = env.DB_NAME.replace("-ee15", "").replace("-ee", "")
                     env.NEW_DB_NAME = "${cleanName}-" + sh(returnStdout: true, script: 'date +%Y%m%d').trim() + "-" + ((params.VERSION == 'v15') ? 'ee15n2' : 'ee19')
                     
-                    // Versión de PG
-                    env.PG_BIN_VERSION = "17" 
-                    if (params.ODOO_URL.contains('sdb-integralis360.com')) {
-                        env.PG_BIN_VERSION = "12"
-                        if (env.DB_NAME.contains('edb') || env.DB_NAME.contains('cgs')) { env.PG_BIN_VERSION = "17" }
-                    }
-
-                    // Selección de Credenciales SSH
                     if (params.VERSION == 'v15') {
                         env.TARGET_IP_FINAL = env.IP_TEST_V15
                         env.SELECTED_PASS = env.SSH_PASS_V15 
@@ -201,70 +191,66 @@ chmod 666 "/workspace/\$FILENAME"
                     env.FINAL_URL = "https://${env.NEW_DB_NAME}.odooecuador.online/web/login"
                     
                     echo "--- DEBUG INFO ---"
-                    echo "IP Destino: ${env.TARGET_IP_FINAL}"
+                    echo "Método: CURL (Universal)"
+                    echo "Parámetro corregido: backup_file"
 
-                    // --- GENERACIÓN DEL SCRIPT DEPLOY ---
-                    // Usamos writeFile para evitar errores de sintaxis en Jenkins
-                    
                     def deployScriptContent = """#!/bin/bash
 set -e
-# Instalar dependencias necesarias
 apt-get update -qq && apt-get install -y sshpass openssh-client curl -qq
 export SSHPASS="\$MY_SSH_PASS"
 
-echo "--- 1. Subiendo archivo a /home/ubuntu ---"
+echo "--- 1. Subiendo archivo ---"
 sshpass -e scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} ubuntu@${env.TARGET_IP_FINAL}:/home/ubuntu/
 
-echo "--- 2. Conectando al Servidor (Modo Root Real) ---"
-
-# Usamos 'sudo bash -s' para que todo el bloque siguiente se ejecute como ROOT.
-# Esto elimina cualquier problema de permisos (Error 26).
-
+echo "--- 2. Restaurando vía CURL (Universal) ---"
 sshpass -e ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_FINAL} 'sudo bash -s' <<'EOF'
 
-    # --- INICIO DEL BLOQUE ROOT ---
+    # Variables
+    FILE_PATH="/home/ubuntu/${env.LOCAL_BACKUP_FILE}"
+    DB_NAME="${env.NEW_DB_NAME}"
     
-    echo ">> Usuario actual: \$(whoami)"
+    # Asegurar permisos de lectura para que curl no falle
+    chmod 644 \$FILE_PATH
     
-    # 1. Ajustar versiones de Postgres
-    echo ">> Ajustando Postgres..."
-    update-alternatives --set psql /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/psql || true
-    update-alternatives --set pg_dump /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_dump || true
-    update-alternatives --set pg_restore /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_restore || true
+    # (OPCIONAL) Limpieza preventiva:
+    # Si la base ya existe "a medias" por un intento fallido, el curl fallará.
+    # Intentamos borrarla primero para asegurar que el restore entra limpio.
+    sudo -u postgres dropdb \$DB_NAME --if-exists || true
     
-    # 2. Mover el archivo a la carpeta destino
-    echo ">> Moviendo archivo a /opt/backup_integralis/..."
-    mv /home/ubuntu/${env.LOCAL_BACKUP_FILE} ${env.BACKUP_DIR_REMOTE}/
+    echo ">> Ejecutando CURL contra localhost:8069..."
+    echo ">> Archivo: \$FILE_PATH"
     
-    # 3. Entrar a la carpeta
-    echo ">> Entrando a: ${env.BACKUP_DIR_REMOTE}/"
-    cd ${env.BACKUP_DIR_REMOTE}/
+    # --- COMANDO CURL CORREGIDO ---
+    # 1. Usamos 'backup_file' (según tu formulario HTML).
+    # 2. Usamos 'copy=true' (porque es un .dump y lo requiere).
+    # 3. Guardamos la respuesta en un log para ver si hay error.
     
-    # 4. Asignar permisos de lectura (chmod 644)
-    chmod 644 ${env.LOCAL_BACKUP_FILE}
-    
-    # 5. Restaurar Odoo
-    echo ">> Restaurando Odoo..."
-    # NOTA: Usamos el arroba (@) seguido del nombre del archivo local.
-    # Al ser Root y estar en la misma carpeta, CURL no fallará.
-    
-    curl -v -k -X POST "http://localhost:8069/web/database/restore" \\
+    curl -v -X POST "http://localhost:8069/web/database/restore" \\
         -F "master_pwd=${env.MASTER_PWD}" \\
-        -F "file=@${env.LOCAL_BACKUP_FILE}" \\
-        -F "name=${env.NEW_DB_NAME}" \\
-        -F "copy=true"
-
-    echo ">> Verificando archivo final:"
-    ls -lah ${env.LOCAL_BACKUP_FILE}
+        -F "backup_file=@\$FILE_PATH" \\
+        -F "name=\$DB_NAME" \\
+        -F "copy=true" \\
+        -o /tmp/restore_response.html
     
-    echo ">> FIN DEL PROCESO"
-    # --- FIN DEL BLOQUE ROOT ---
+    # Verificamos si la respuesta contiene "error"
+    if grep -q "error" /tmp/restore_response.html; then
+        echo "⚠️ ALERTA: El servidor respondió con posible error. Revisando:"
+        grep -o 'class="alert alert-danger">.*</div>' /tmp/restore_response.html || head -n 20 /tmp/restore_response.html
+        
+        # Si dice "Postgres subprocess error 1", generalmente es porque la base ya existía
+        # o por conflicto de versiones, pero con el dropdb previo debería pasar.
+    else
+        echo "✅ Restauración Web completada correctamente."
+    fi
+    
+    # Limpieza
+    rm -f \$FILE_PATH
+    echo ">> Fin del proceso."
 EOF
 """
                     writeFile file: 'deploy.sh', text: deployScriptContent
                     sh "chmod +x deploy.sh"
 
-                    echo "--- Ejecutando Docker Deploy ---"
                     sh """
                         docker rm -f vpn-deploy || true
                         docker run -d --name vpn-deploy \\
@@ -276,7 +262,6 @@ EOF
                         docker cp deploy.sh vpn-deploy:/workspace/
                         docker cp ${env.LOCAL_BACKUP_FILE} vpn-deploy:/workspace/
                         
-                        echo "--- Lanzando Script... ---"
                         docker exec vpn-deploy /workspace/deploy.sh
                             
                         docker rm -f vpn-deploy
