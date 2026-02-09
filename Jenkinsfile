@@ -10,14 +10,11 @@ pipeline {
     }
 
     environment {
-        // Credenciales
         ROOT_PASS_ID = 'root-password-prod' 
         GOOGLE_CHAT_WEBHOOK = credentials('GOOGLE_CHAT_WEBHOOK')
-        
         IP_TEST_V15 = "148.113.165.227" 
         IP_TEST_V19 = "158.69.210.128"
         BACKUP_DIR_REMOTE = "/opt/backup_integralis"
-        
         ODOO_LOCAL_URL = "https://faceable-maddison-unharangued.ngrok-free.dev" 
         ODOO_LOCAL_DB = "prueba"
         ODOO_LOCAL_PASS = credentials('odoo-local-api-key') 
@@ -31,28 +28,39 @@ pipeline {
                     sh "docker rm -f vpn-sidecar || true"
 
                     echo "--- Preparando Configuración VPN ---"
-                    // El plugin pone 'pasante.ovpn' en la raíz del workspace (BackupFromProduction/pasante.ovpn)
                     configFileProvider([configFile(fileId: 'vpn-pasante-file', targetLocation: 'pasante.ovpn')]) {
                         
-                        echo "--- Arrancando Contenedor VPN ---"
-                        // MOUNT MÁGICO:
-                        // Montamos el workspace actual (${WORKSPACE}) en la carpeta /vpn del contenedor.
-                        // Como ya no hay espacios en el nombre, esto funciona nativo y sin errores.
+                        echo "--- Arrancando Contenedor en modo 'Zombie' ---"
+                        // 1. Iniciamos el contenedor con 'sleep infinity'. 
+                        // Esto garantiza que el contenedor NO SE APAGUE aunque falle la instalación.
                         sh """
                             docker run -d --name vpn-sidecar \
                             --cap-add=NET_ADMIN --device /dev/net/tun \
                             -v "${WORKSPACE}":/vpn \
                             ubuntu:22.04 \
-                            sh -c "apt-get update && apt-get install -y openvpn && \
-                                   echo '--- Iniciando OpenVPN ---' && \
-                                   openvpn --config /vpn/pasante.ovpn"
+                            sleep infinity
                         """
+
+                        echo "--- Instalando OpenVPN ---"
+                        // 2. Instalamos software en el contenedor vivo
+                        sh "docker exec vpn-sidecar apt-get update"
+                        sh "docker exec vpn-sidecar apt-get install -y openvpn iproute2 iputils-ping"
+
+                        echo "--- Iniciando Servicio VPN ---"
+                        // 3. Ejecutamos OpenVPN en modo 'daemon' (segundo plano)
+                        // Agregamos --log para guardar el error en un archivo si falla
+                        sh "docker exec vpn-sidecar openvpn --config /vpn/pasante.ovpn --daemon --log /vpn/vpn-debug.log"
                     }
                     
                     echo "--- Esperando conexión (15s) ---"
                     sleep 15
                     
-                    // Validamos que la interfaz tun0 exista y mostramos la IP
+                    // 4. DIAGNÓSTICO DE VIDA O MUERTE
+                    echo "--- Verificando Logs de OpenVPN ---"
+                    // Leemos el log que generó OpenVPN. Si falló, aquí nos dirá por qué.
+                    sh "docker exec vpn-sidecar cat /vpn/vpn-debug.log || echo 'No se pudo leer el log'"
+                    
+                    echo "--- Verificando Interfaz ---"
                     sh "docker exec vpn-sidecar ip addr show tun0"
                 }
             }
@@ -73,7 +81,6 @@ pipeline {
                         env.MASTER_PWD = credentials('vault-integralis360.website')
                     }
 
-                    // Script Python para extraer nombre BD de forma segura
                     def pyScript = """
 import sys, json
 try:
@@ -84,12 +91,10 @@ except:
 """
                     writeFile file: 'extract.py', text: pyScript
 
-                    // Script de descarga
                     def mainScript = """#!/bin/bash
 set -e
 apt-get update -qq && apt-get install -y curl python3 -qq
 
-# Verificamos que estamos viendo el túnel del sidecar
 ifconfig tun0 || ip addr show tun0 || echo '⚠️ No veo tun0'
 
 echo '--- Consultando Odoo ---'
@@ -117,7 +122,6 @@ curl -k -X POST \
     "https://${params.ODOO_URL}/web/database/backup" \
     -o "/workspace/\$FILENAME"
 
-# Guardamos datos para el siguiente stage
 echo "\$FILENAME" > /workspace/filename.txt
 echo "\$DB_NAME" > /workspace/dbname.txt
 chmod 666 "/workspace/\$FILENAME"
@@ -126,8 +130,6 @@ chmod 666 "/workspace/\$FILENAME"
                     sh "chmod +x download.sh"
 
                     echo "--- Ejecutando Worker ---"
-                    // Conectamos a la red del sidecar (--network container:vpn-sidecar)
-                    // Montamos el workspace (-v) en /workspace
                     sh """
                         docker run --rm \
                         --network container:vpn-sidecar \
