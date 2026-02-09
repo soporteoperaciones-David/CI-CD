@@ -163,16 +163,16 @@ chmod 666 "/workspace/\$FILENAME"
                         if (env.DB_NAME.contains('edb') || env.DB_NAME.contains('cgs')) { env.PG_BIN_VERSION = "17" }
                     }
 
-                    // --- SELECCIÓN DE DESTINO ---
+                    // Selección de Destino
                     def target_ip = ""
                     def credential_id = ""
 
                     if (params.VERSION == 'v15') {
                         target_ip = env.IP_TEST_V15
-                        credential_id = 'ssh-pass-v15' // Asegúrate de que este ID exista en Jenkins
+                        credential_id = 'ssh-pass-v15' 
                     } else {
                         target_ip = env.IP_TEST_V19
-                        credential_id = 'ssh-pass-v19' // Asegúrate de que este ID exista en Jenkins
+                        credential_id = 'ssh-pass-v19' 
                     }
 
                     env.FINAL_URL = "https://${env.NEW_DB_NAME}.odooecuador.online/web/login"
@@ -180,56 +180,54 @@ chmod 666 "/workspace/\$FILENAME"
 
                     withCredentials([string(credentialsId: credential_id, variable: 'SSH_PASS')]) {
                         
-                        echo "--- Credencial cargada. Generando script genérico... ---"
+                        echo "--- Generando script de despliegue ---"
 
-                        // CAMBIO CLAVE: 
-                        // Usamos \$SSH_PASS (con barra invertida) para que Groovy NO la toque.
-                        // Bash leerá la variable de entorno del contenedor.
+                        // IMPORTANTE: Fíjate que usamos \$SSH_PASS (con barra invertida).
+                        // Esto evita que Jenkins intente leer la variable aquí y falle.
                         def deployScript = """#!/bin/bash
 set -e
 apt-get update -qq && apt-get install -y sshpass openssh-client curl -qq
 
-echo "--- Usando IP: ${target_ip} ---"
-
-echo '--- 1. Subiendo archivo a /home/ubuntu (SCP) ---'
+echo "--- 1. Subiendo archivo a /home/ubuntu ---"
+# El script leerá la variable de entorno del sistema, no del archivo
 sshpass -p "\$SSH_PASS" scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} ubuntu@${target_ip}:/home/ubuntu/
 
-echo '--- 2. Ejecutando comandos remotos (SSH + SUDO) ---'
+echo "--- 2. Ejecutando restauración remota ---"
 sshpass -p "\$SSH_PASS" ssh -o StrictHostKeyChecking=no ubuntu@${target_ip} '
     
-    echo "Moviendo archivo..."
+    echo "Moviendo archivo a carpeta protegida..."
     sudo mv /home/ubuntu/${env.LOCAL_BACKUP_FILE} ${env.BACKUP_DIR_REMOTE}/
     sudo chmod 644 ${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}
 
-    echo "Configurando Postgres..."
+    echo "Ajustando versiones de Postgres..."
     sudo update-alternatives --set psql /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/psql || true
     sudo update-alternatives --set pg_dump /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_dump || true
     sudo update-alternatives --set pg_restore /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_restore || true
     
-    echo "Restaurando ${env.NEW_DB_NAME}..."
+    echo "Llamando a Odoo Restore..."
     curl -k -X POST "http://localhost:8069/web/database/restore" \
         -F "master_pwd=${env.MASTER_PWD}" \
         -F "file=@${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}" \
         -F "name=${env.NEW_DB_NAME}" \
         -F "copy=true"
     
-    echo "Limpiando..."
+    echo "Limpiando archivo remoto..."
     sudo rm -f ${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}
 '
 """
                         writeFile file: 'deploy.sh', text: deployScript
                         sh "chmod +x deploy.sh"
 
-                        echo "--- Ejecutando contenedor con inyección de credencial ---"
+                        echo "--- Ejecutando contenedor ---"
                         
-                        // CAMBIO CLAVE 2:
-                        // Pasamos la contraseña como variable de entorno al contenedor (-e)
-                        // Aquí sí usamos ${env.SSH_PASS} porque estamos en el comando 'sh'
+                        // AQUÍ OCURRE LA MAGIA:
+                        // Pasamos la variable de Jenkins (${SSH_PASS}) al contenedor (-e SSH_PASS=...)
+                        // Usamos comillas dobles en el sh """ ... """ para que Jenkins pueda inyectar el valor.
                         sh """
                             docker rm -f vpn-deploy || true
                             
                             docker run -d --name vpn-deploy \
-                                -e SSH_PASS="${env.SSH_PASS}" \
+                                -e SSH_PASS="${SSH_PASS}" \
                                 --network container:vpn-sidecar \
                                 ubuntu:22.04 sleep infinity
                             
