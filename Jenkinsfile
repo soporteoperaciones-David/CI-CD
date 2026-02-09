@@ -177,7 +177,11 @@ chmod 666 "/workspace/\$FILENAME"
 
                     env.FINAL_URL = "https://${env.NEW_DB_NAME}.odooecuador.online/web/login"
                     echo "--- Destino: ubuntu@${target_ip} ---"
-
+                    echo "--- DEBUG INFO ---"
+                    echo "IP Destino: ${target_ip}"
+                    echo "ID Credencial a usar: ${my_cred_id}"
+                    echo "Archivo: ${env.LOCAL_BACKUP_FILE}"
+                    echo "------------------"
                     withCredentials([string(credentialsId: credential_id, variable: 'SSH_PASS')]) {
                         
                         echo "--- Generando script de despliegue ---"
