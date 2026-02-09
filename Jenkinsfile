@@ -10,18 +10,19 @@ pipeline {
     }
 
     environment {
-        // --- 1. CARGA DE CREDENCIALES GLOBAL (SIN BLOQUES ANIDADOS) ---
-        // Al definirlas aquí, Jenkins las maneja automáticamente como variables de entorno enmascaradas.
-        PASS_V15 = credentials('ssh-pass-v15') 
-        PASS_V19 = credentials('ssh-pass-v19')
+        // --- CREDENCIALES CARGADAS AL INICIO ---
+        // Esto evita el uso de bloques withCredentials complejos
+        SSH_PASS_V15 = credentials('ssh-pass-v15') 
+        SSH_PASS_V19 = credentials('ssh-pass-v19')
         
-        // Otras vars
         GOOGLE_CHAT_WEBHOOK = credentials('GOOGLE_CHAT_WEBHOOK')
+        
+        // IPs
         IP_TEST_V15 = "148.113.165.227" 
         IP_TEST_V19 = "158.69.210.128"
+        
         BACKUP_DIR_REMOTE = "/opt/backup_integralis"
         
-        // Odoo Local
         ODOO_LOCAL_URL = "https://faceable-maddison-unharangued.ngrok-free.dev" 
         ODOO_LOCAL_DB = "prueba"
         ODOO_LOCAL_PASS = credentials('odoo-local-api-key') 
@@ -36,25 +37,17 @@ pipeline {
 
                     echo "--- Preparando Configuración VPN ---"
                     configFileProvider([configFile(fileId: 'vpn-pasante-file', targetLocation: 'pasante.ovpn')]) {
-                        echo "--- Arrancando Contenedor Zombie ---"
                         sh "docker run -d --name vpn-sidecar --cap-add=NET_ADMIN --device /dev/net/tun ubuntu:22.04 sleep infinity"
-
-                        echo "--- Instalando OpenVPN ---"
-                        sh "docker exec vpn-sidecar apt-get update"
-                        sh "docker exec vpn-sidecar apt-get install -y openvpn iproute2 iputils-ping"
-
-                        echo "--- Copiando archivo VPN ---"
+                        
+                        // Instalación en una sola línea para ser más robusto
+                        sh "docker exec vpn-sidecar sh -c 'apt-get update && apt-get install -y openvpn iproute2 iputils-ping'"
+                        
                         sh "docker cp pasante.ovpn vpn-sidecar:/etc/openvpn/client.conf"
-
-                        echo "--- Iniciando Servicio VPN ---"
                         sh "docker exec -d vpn-sidecar openvpn --config /etc/openvpn/client.conf --daemon --log /tmp/vpn.log"
                     }
                     
                     echo "--- Esperando conexión (15s) ---"
                     sleep 15
-                    
-                    echo "--- Verificando Logs ---"
-                    sh "docker exec vpn-sidecar cat /tmp/vpn.log || echo 'No log found'"
                     sh "docker exec vpn-sidecar ip addr show tun0"
                 }
             }
@@ -89,7 +82,6 @@ except:
 set -e
 apt-get update -qq && apt-get install -y curl python3 iproute2 -qq
 
-echo '--- Verificando túnel ---'
 ip addr show tun0 || echo '⚠️ Alerta: tun0 no visible'
 
 echo '--- Consultando Odoo ---'
@@ -154,7 +146,7 @@ chmod 666 "/workspace/\$FILENAME"
        stage('3. Enviar y Restaurar (Vía VPN)') {
             steps {
                 script {
-                    // --- PREPARACIÓN DE VARIABLES ---
+                    // --- 1. PREPARACIÓN DE VARIABLES ---
                     env.LOCAL_BACKUP_FILE = readFile('filename.txt').trim()
                     env.DB_NAME = readFile('dbname.txt').trim()
                     env.NEW_DB_NAME = "${env.DB_NAME}-" + sh(returnStdout: true, script: 'date +%Y%m%d').trim() + "-" + ((params.VERSION == 'v15') ? 'ee15n2' : 'ee19')
@@ -165,28 +157,27 @@ chmod 666 "/workspace/\$FILENAME"
                         if (env.DB_NAME.contains('edb') || env.DB_NAME.contains('cgs')) { env.PG_BIN_VERSION = "17" }
                     }
 
-                    // --- SELECCIÓN DE CREDENCIALES YA CARGADAS ---
-                    // No usamos withCredentials. Usamos las variables del environment {}
+                    // --- 2. SELECCIÓN DE CREDENCIALES ---
+                    // IMPORTANTE: Asignamos valores a variables env globales para evitar error de compilación
                     if (params.VERSION == 'v15') {
                         env.TARGET_IP_FINAL = env.IP_TEST_V15
-                        env.SELECTED_PASS = env.PASS_V15  // <-- ¡Directo del environment!
+                        env.SELECTED_PASS = env.SSH_PASS_V15
                     } else {
                         env.TARGET_IP_FINAL = env.IP_TEST_V19
-                        env.SELECTED_PASS = env.PASS_V19  // <-- ¡Directo del environment!
+                        env.SELECTED_PASS = env.SSH_PASS_V19
                     }
 
                     env.FINAL_URL = "https://${env.NEW_DB_NAME}.odooecuador.online/web/login"
                     
                     echo "--- DEBUG INFO ---"
                     echo "IP: ${env.TARGET_IP_FINAL}"
-                    echo "Usando Credencial Global."
 
-                    // --- EJECUCIÓN (Modo Linux Nativo sin Groovy Interpolation compleja) ---
-                    // Usamos sh """ ... """ para poder inyectar ${env.SELECTED_PASS} en el comando docker run
+                    // --- 3. EJECUCIÓN (Corrección de Sintaxis) ---
+                    // Usamos sh """ ... """ y referenciamos todo con ${env.VAR}
+                    
                     sh """
-                        # 1. Creamos el script deploy.sh
-                        # Usamos \\ (doble escape) para variables que queremos que BASH resuelva (como \$1)
-                        # Usamos \${VAR} normal para variables que JENKINS inyecta ahora
+                        # Creamos el script deploy.sh usando CAT
+                        # Nota: Usamos las variables de entorno de Jenkins (${env.VAR})
                         
                         cat <<EOF > deploy.sh
 #!/bin/bash
@@ -194,7 +185,7 @@ set -e
 apt-get update -qq && apt-get install -y sshpass openssh-client curl -qq
 
 echo "--- Subiendo archivo a ${env.TARGET_IP_FINAL} ---"
-# Leemos la variable de entorno interna del contenedor
+# Leemos la variable de entorno \$MY_SSH_PASS que inyectaremos en Docker
 sshpass -p "\$MY_SSH_PASS" scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} ubuntu@${env.TARGET_IP_FINAL}:/home/ubuntu/
 
 echo "--- Ejecutando comandos remotos ---"
@@ -225,10 +216,7 @@ EOF
                         echo "--- Ejecutando Docker ---"
                         docker rm -f vpn-deploy || true
                         
-                        # AQUÍ ESTÁ LA SOLUCIÓN:
-                        # Pasamos la variable cargada globalmente (env.SELECTED_PASS)
-                        # al contenedor como "MY_SSH_PASS".
-                        
+                        # Inyectamos la contraseña seleccionada como variable de entorno
                         docker run -d --name vpn-deploy \\
                             -e MY_SSH_PASS="${env.SELECTED_PASS}" \\
                             --network container:vpn-sidecar \\
@@ -274,10 +262,7 @@ EOF
 
     post {
         always {
-            echo "--- Limpiando Sidecar ---"
-            sh "docker rm -f vpn-sidecar || true"
-            sh "docker rm -f vpn-worker || true"
-            sh "docker rm -f vpn-deploy || true"
+            sh "docker rm -f vpn-sidecar vpn-worker vpn-deploy || true"
             cleanWs()
         }
     }
