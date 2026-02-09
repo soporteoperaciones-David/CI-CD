@@ -165,7 +165,9 @@ chmod 666 "/workspace/\$FILENAME"
                     echo "--- DEBUG INFO ---"
                     echo "IP Destino: ${env.TARGET_IP_FINAL}"
 
-                    // --- SCRIPT CON 'SUDO SU' SIMULADO ---
+                    // --- SCRIPT CON HEREDOC (Adiós error de comillas) ---
+                    // Usamos 'sudo bash -s' para que lea los comandos que le enviamos
+                    
                     def deployScriptContent = """#!/bin/bash
 set -e
 apt-get update -qq && apt-get install -y sshpass openssh-client curl -qq
@@ -174,38 +176,41 @@ export SSHPASS="\$MY_SSH_PASS"
 echo "--- 1. Subiendo archivo a /home/ubuntu ---"
 sshpass -e scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} ubuntu@${env.TARGET_IP_FINAL}:/home/ubuntu/
 
-echo "--- 2. Ejecutando Modo ROOT (Sudo Su) ---"
-# Aquí está la magia: ssh conecta como ubuntu, pero 'sudo bash -c' nos vuelve ROOT adentro
-sshpass -e ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_FINAL} "sudo bash -c '
+echo "--- 2. Ejecutando Modo ROOT (Heredoc) ---"
 
-    echo \">> SOY EL USUARIO: \$(whoami) (Debe ser root)\"
+# ESTA ES LA SOLUCIÓN:
+# Usamos <<'ENDSSH' para enviar el bloque de código sin conflictos de comillas.
+# Todo lo que esté entre aquí y ENDSSH se ejecutará en el servidor remoto como ROOT.
+
+sshpass -e ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_FINAL} 'sudo bash -s' <<'ENDSSH'
+
+    echo ">> SOY EL USUARIO: \$(whoami) (Debe ser root)"
     
-    # 1. Movemos el archivo a la carpeta protegida (Como somos root, podemos)
-    echo \">> Moviendo archivo a /opt/backup_integralis/...\"
+    # 1. Movemos el archivo (Como somos root, no hay restricción)
+    echo ">> Moviendo archivo a /opt/backup_integralis/..."
     mv /home/ubuntu/${env.LOCAL_BACKUP_FILE} ${env.BACKUP_DIR_REMOTE}/
     
-    # 2. Damos permisos totales para evitar problemas de lectura
+    # 2. Permisos totales para evitar problemas
     chmod 777 ${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}
     
     # 3. Ajustamos Postgres
-    echo \">> Ajustando Postgres...\"
+    echo ">> Ajustando Postgres..."
     update-alternatives --set psql /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/psql || true
     update-alternatives --set pg_dump /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_dump || true
     update-alternatives --set pg_restore /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_restore || true
     
-    # 4. Ejecutamos CURL siendo ROOT
-    # Como somos root, curl puede leer CUALQUIER archivo sin error 26.
-    echo \">> Restaurando Odoo...\"
+    # 4. Restauramos (Siendo root, curl no falla al leer el archivo)
+    echo ">> Restaurando Odoo..."
     
-    curl -v -k -X POST \"http://localhost:8069/web/database/restore\" \\
-        -F \"master_pwd=${env.MASTER_PWD}\" \\
-        -F \"file=@${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}\" \\
-        -F \"name=${env.NEW_DB_NAME}\" \\
-        -F \"copy=true\"
+    curl -v -k -X POST "http://localhost:8069/web/database/restore" \\
+        -F "master_pwd=${env.MASTER_PWD}" \\
+        -F "file=@${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}" \\
+        -F "name=${env.NEW_DB_NAME}" \\
+        -F "copy=true"
 
-    echo \">> Base restaurada. Archivo guardado en:\"
+    echo ">> Base restaurada. Verificando archivo:"
     ls -lah ${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}
-'"
+ENDSSH
 """
                     writeFile file: 'deploy.sh', text: deployScriptContent
                     sh "chmod +x deploy.sh"
