@@ -10,11 +10,9 @@ pipeline {
     }
 
     environment {
-        // --- CORRECCIÓN AQUÍ ---
-        // Usamos el ID exacto que tienes en la foto: 'root-pass-v15'
+        // --- CREDENCIALES ---
+        // Asegúrate de que los IDs coinciden con los de tu Jenkins
         SSH_PASS_V15 = credentials('root-pass-v15') 
-        
-        // El de la v19 sí se llama 'ssh-pass-v19' según tu imagen
         SSH_PASS_V19 = credentials('ssh-pass-v19')
         
         GOOGLE_CHAT_WEBHOOK = credentials('GOOGLE_CHAT_WEBHOOK')
@@ -37,18 +35,13 @@ pipeline {
                     echo "--- Limpiando entorno ---"
                     sh "docker rm -f vpn-sidecar || true"
 
-                    echo "--- Preparando Configuración VPN ---"
                     configFileProvider([configFile(fileId: 'vpn-pasante-file', targetLocation: 'pasante.ovpn')]) {
                         sh "docker run -d --name vpn-sidecar --cap-add=NET_ADMIN --device /dev/net/tun ubuntu:22.04 sleep infinity"
-                        
-                        // Instalación robusta
                         sh "docker exec vpn-sidecar sh -c 'apt-get update && apt-get install -y openvpn iproute2 iputils-ping'"
-                        
                         sh "docker cp pasante.ovpn vpn-sidecar:/etc/openvpn/client.conf"
-                        sh "docker exec -d vpn-sidecar openvpn --config /etc/openvpn/client.conf --daemon --log /tmp/vpn.log"
+                        sh "docker exec -d vpn-sidecar openvpn --config /etc/openvpn/client.conf --daemon"
                     }
                     
-                    echo "--- Esperando conexión (15s) ---"
                     sleep 15
                     sh "docker exec vpn-sidecar ip addr show tun0"
                 }
@@ -58,8 +51,7 @@ pipeline {
         stage('2. Descargar Backup (Vía VPN)') {
             steps {
                 script {
-                    echo "--- Generando Scripts ---"
-                    
+                    // Selección de Password Maestro
                     if (params.ODOO_URL.contains('.sdb-integralis360.com')) {
                         env.MASTER_PWD = credentials('vault-sdb-integralis360.com')
                     } else if (params.ODOO_URL.contains('.dic-integralis360.com')) {
@@ -70,6 +62,7 @@ pipeline {
                         env.MASTER_PWD = credentials('vault-integralis360.website')
                     }
 
+                    // Script Python para extraer nombre
                     def pyScript = """
 import sys, json
 try:
@@ -80,7 +73,9 @@ except:
 """
                     writeFile file: 'extract.py', text: pyScript
 
-                    def mainScript = """#!/bin/bash
+                    // Script Bash de descarga
+                    // Usamos \$ para variables internas de bash, y ${env.VAR} para variables de Jenkins
+                    def downloadScriptContent = """#!/bin/bash
 set -e
 apt-get update -qq && apt-get install -y curl python3 iproute2 -qq
 
@@ -120,25 +115,20 @@ echo "\$FILENAME" > /workspace/filename.txt
 echo "\$DB_NAME" > /workspace/dbname.txt
 chmod 666 "/workspace/\$FILENAME"
 """
-                    writeFile file: 'download.sh', text: mainScript
+                    writeFile file: 'download.sh', text: downloadScriptContent
                     sh "chmod +x download.sh"
 
-                    echo "--- Ejecutando Worker ---"
                     sh """
                         docker rm -f vpn-worker || true
                         docker run -d --name vpn-worker --network container:vpn-sidecar ubuntu:22.04 sleep infinity
-                        
                         docker exec vpn-worker mkdir -p /workspace
                         docker cp extract.py vpn-worker:/workspace/
                         docker cp download.sh vpn-worker:/workspace/
-                        
                         docker exec vpn-worker /workspace/download.sh
-                        
                         docker cp vpn-worker:/workspace/filename.txt .
                         docker cp vpn-worker:/workspace/dbname.txt .
                         FILENAME=\$(cat filename.txt)
                         docker cp vpn-worker:/workspace/\$FILENAME .
-                        
                         docker rm -f vpn-worker
                     """
                 }
@@ -172,20 +162,19 @@ chmod 666 "/workspace/\$FILENAME"
                     echo "--- DEBUG INFO ---"
                     echo "IP: ${env.TARGET_IP_FINAL}"
 
-                    // --- EJECUCIÓN ---
-                    sh """
-                        cat <<EOF > deploy.sh
-#!/bin/bash
+                    // --- GENERACIÓN DEL SCRIPT DE DEPLOY (SOLUCIÓN DEL ERROR) ---
+                    // Usamos writeFile para evitar el error de "illegal string body character" en el bloque sh
+                    
+                    def deployScriptContent = """#!/bin/bash
 set -e
 apt-get update -qq && apt-get install -y sshpass openssh-client curl -qq
 
-# --- CORRECCIÓN IMPORTANTE ---
-# Exportamos la variable SSHPASS. sshpass buscará aquí la contraseña automáticamente.
-# Esto evita que los caracteres especiales ($, !, @) rompan el comando.
+# --- EXPORTAR SSHPASS PARA USO SEGURO ---
+# El \\ es para que Groovy escriba un literal \$ en el archivo
 export SSHPASS="\$MY_SSH_PASS"
 
 echo "--- Subiendo archivo a ${env.TARGET_IP_FINAL} ---"
-# Usamos '-e' para que lea la variable de entorno SSHPASS
+# Usamos -e para leer la variable de entorno SSHPASS (seguro contra caracteres especiales)
 sshpass -e scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} ubuntu@${env.TARGET_IP_FINAL}:/home/ubuntu/
 
 echo "--- Ejecutando comandos remotos ---"
@@ -209,13 +198,17 @@ sshpass -e ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_FINAL} '
     echo "Limpiando..."
     sudo rm -f ${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}
 '
-EOF
-                        
-                        chmod +x deploy.sh
-                        
-                        echo "--- Ejecutando Docker ---"
+"""
+                    // Escribimos el script en disco
+                    writeFile file: 'deploy.sh', text: deployScriptContent
+                    sh "chmod +x deploy.sh"
+
+                    // --- EJECUCIÓN DOCKER ---
+                    sh """
+                        echo "--- Iniciando contenedor ---"
                         docker rm -f vpn-deploy || true
                         
+                        # Pasamos la contraseña como variable de entorno
                         docker run -d --name vpn-deploy \\
                             -e MY_SSH_PASS="${env.SELECTED_PASS}" \\
                             --network container:vpn-sidecar \\
