@@ -10,10 +10,6 @@ pipeline {
     }
 
     environment {
-        // RUTA REAL EN EL SERVIDOR FÍSICO (Host)
-        // Docker la leerá directo del disco, Jenkins no la tocará.
-        HOST_VPN_FILE = "/home/ubuntu/pasante.ovpn"
-        
         // Credenciales
         ROOT_PASS_ID = 'root-password-prod' 
         GOOGLE_CHAT_WEBHOOK = credentials('GOOGLE_CHAT_WEBHOOK')
@@ -31,29 +27,33 @@ pipeline {
         stage('1. Iniciar Sidecar VPN') {
             steps {
                 script {
-                    echo "--- Limpiando contenedores viejos ---"
+                    echo "--- Limpiando entorno ---"
                     sh "docker rm -f vpn-sidecar || true"
 
-                    echo "--- Arrancando Contenedor VPN (Sidecar) ---"
-                    
-                    // CORRECCIÓN CLAVE:
-                    // Eliminamos el 'cp'. Usamos ${env.HOST_VPN_FILE} directo en el -v.
-                    // El demonio de Docker en el host SÍ puede leer /home/ubuntu/...
-                    sh """
-                        docker run -d --name vpn-sidecar \
-                        --cap-add=NET_ADMIN --device /dev/net/tun \
-                        -v ${env.HOST_VPN_FILE}:/vpn/config.ovpn \
-                        ubuntu:22.04 \
-                        sh -c "apt-get update && apt-get install -y openvpn && \
-                               echo '--- Iniciando OpenVPN ---' && \
-                               openvpn --config /vpn/config.ovpn"
-                    """
+                    echo "--- Preparando Configuración VPN ---"
+                    // El plugin pone 'pasante.ovpn' en la raíz del workspace (BackupFromProduction/pasante.ovpn)
+                    configFileProvider([configFile(fileId: 'vpn-pasante-file', targetLocation: 'pasante.ovpn')]) {
+                        
+                        echo "--- Arrancando Contenedor VPN ---"
+                        // MOUNT MÁGICO:
+                        // Montamos el workspace actual (${WORKSPACE}) en la carpeta /vpn del contenedor.
+                        // Como ya no hay espacios en el nombre, esto funciona nativo y sin errores.
+                        sh """
+                            docker run -d --name vpn-sidecar \
+                            --cap-add=NET_ADMIN --device /dev/net/tun \
+                            -v "${WORKSPACE}":/vpn \
+                            ubuntu:22.04 \
+                            sh -c "apt-get update && apt-get install -y openvpn && \
+                                   echo '--- Iniciando OpenVPN ---' && \
+                                   openvpn --config /vpn/pasante.ovpn"
+                        """
+                    }
                     
                     echo "--- Esperando conexión (15s) ---"
                     sleep 15
                     
-                    // Verificamos logs para confirmar conexión exitosa
-                    sh "docker logs vpn-sidecar"
+                    // Validamos que la interfaz tun0 exista y mostramos la IP
+                    sh "docker exec vpn-sidecar ip addr show tun0"
                 }
             }
         }
@@ -61,7 +61,7 @@ pipeline {
         stage('2. Descargar Backup (Vía VPN)') {
             steps {
                 script {
-                    echo "--- Generando Script de Descarga ---"
+                    echo "--- Generando Scripts ---"
                     
                     if (params.ODOO_URL.contains('.sdb-integralis360.com')) {
                         env.MASTER_PWD = credentials('vault-sdb-integralis360.com')
@@ -73,14 +73,23 @@ pipeline {
                         env.MASTER_PWD = credentials('vault-integralis360.website')
                     }
 
-                    // CORRECCIÓN DE SINTAXIS:
-                    // Usamos 'writeFile' para evitar líos de comillas en la terminal.
-                    // Y arreglamos el script de python escapando los signos de dolar ($) necesarios.
-                    def scriptContent = """#!/bin/bash
+                    // Script Python para extraer nombre BD de forma segura
+                    def pyScript = """
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    print(data['result'][0])
+except:
+    print("ERROR")
+"""
+                    writeFile file: 'extract.py', text: pyScript
+
+                    // Script de descarga
+                    def mainScript = """#!/bin/bash
 set -e
 apt-get update -qq && apt-get install -y curl python3 -qq
 
-echo '--- Verificando conexión VPN ---'
+# Verificamos que estamos viendo el túnel del sidecar
 ifconfig tun0 || ip addr show tun0 || echo '⚠️ No veo tun0'
 
 echo '--- Consultando Odoo ---'
@@ -88,9 +97,13 @@ DB_JSON=\$(curl -s -k -X POST "https://${params.ODOO_URL}/web/database/list" \
     -H "Content-Type: application/json" \
     -d '{"params": {"master_pwd": "${env.MASTER_PWD}"}}')
 
-# Extracción de nombre corregida
-DB_NAME=\$(echo "\$DB_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin)['result'][0])")
+DB_NAME=\$(echo "\$DB_JSON" | python3 /workspace/extract.py)
 echo "Base detectada: \$DB_NAME"
+
+if [ "\$DB_NAME" == "ERROR" ]; then
+    echo "❌ Fallo al leer nombre de BD"
+    exit 1
+fi
 
 DATE=\$(date +%Y%m%d)
 EXT="${params.BACKUP_TYPE == 'zip' ? 'zip' : 'dump'}"
@@ -104,21 +117,23 @@ curl -k -X POST \
     "https://${params.ODOO_URL}/web/database/backup" \
     -o "/workspace/\$FILENAME"
 
-# Guardar nombres para Jenkins
+# Guardamos datos para el siguiente stage
 echo "\$FILENAME" > /workspace/filename.txt
 echo "\$DB_NAME" > /workspace/dbname.txt
 chmod 666 "/workspace/\$FILENAME"
 """
-                    writeFile file: 'download_script.sh', text: scriptContent
-                    sh "chmod +x download_script.sh"
+                    writeFile file: 'download.sh', text: mainScript
+                    sh "chmod +x download.sh"
 
-                    echo "--- Ejecutando Worker de Descarga ---"
+                    echo "--- Ejecutando Worker ---"
+                    // Conectamos a la red del sidecar (--network container:vpn-sidecar)
+                    // Montamos el workspace (-v) en /workspace
                     sh """
                         docker run --rm \
                         --network container:vpn-sidecar \
-                        -v ${WORKSPACE}:/workspace \
+                        -v "${WORKSPACE}":/workspace \
                         ubuntu:22.04 \
-                        /workspace/download_script.sh
+                        /workspace/download.sh
                     """
                 }
             }
@@ -127,8 +142,6 @@ chmod 666 "/workspace/\$FILENAME"
         stage('3. Enviar y Restaurar (Vía VPN)') {
             steps {
                 script {
-                    echo "--- Generando Script de Restore ---"
-                    
                     env.LOCAL_BACKUP_FILE = readFile('filename.txt').trim()
                     env.DB_NAME = readFile('dbname.txt').trim()
                     env.NEW_DB_NAME = "${env.DB_NAME}-" + sh(returnStdout: true, script: 'date +%Y%m%d').trim() + "-" + ((params.VERSION == 'v15') ? 'ee15n2' : 'ee19')
@@ -144,14 +157,14 @@ chmod 666 "/workspace/\$FILENAME"
 
                     withCredentials([string(credentialsId: env.ROOT_PASS_ID, variable: 'ROOT_PASS')]) {
                         
-                        def deployContent = """#!/bin/bash
+                        def deployScript = """#!/bin/bash
 set -e
 apt-get update -qq && apt-get install -y sshpass openssh-client curl -qq
 
-echo '--- Enviando archivo por SCP (Tunel VPN) ---'
+echo '--- Enviando archivo ---'
 sshpass -p '${ROOT_PASS}' scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} root@${target_ip}:${env.BACKUP_DIR_REMOTE}/
 
-echo '--- Ejecutando restauración remota ---'
+echo '--- Restaurando ---'
 sshpass -p '${ROOT_PASS}' ssh -o StrictHostKeyChecking=no root@${target_ip} '
     update-alternatives --set psql /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/psql
     update-alternatives --set pg_dump /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_dump
@@ -167,16 +180,15 @@ sshpass -p '${ROOT_PASS}' ssh -o StrictHostKeyChecking=no root@${target_ip} '
     rm -f ${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}
 '
 """
-                        writeFile file: 'deploy_script.sh', text: deployContent
-                        sh "chmod +x deploy_script.sh"
+                        writeFile file: 'deploy.sh', text: deployScript
+                        sh "chmod +x deploy.sh"
 
-                        echo "--- Ejecutando Worker de Restore ---"
                         sh """
                             docker run --rm \
                             --network container:vpn-sidecar \
-                            -v ${WORKSPACE}:/workspace \
+                            -v "${WORKSPACE}":/workspace \
                             ubuntu:22.04 \
-                            /workspace/deploy_script.sh
+                            /workspace/deploy.sh
                         """
                     }
                 }
@@ -188,8 +200,7 @@ sshpass -p '${ROOT_PASS}' ssh -o StrictHostKeyChecking=no root@${target_ip} '
                 script {
                     def chat_msg = """{"text": "✅ *Respaldo Completado*\\n*Base:* ${env.NEW_DB_NAME}\\n*URL:* ${env.FINAL_URL}"}"""
                     sh "curl -X POST -H 'Content-Type: application/json; charset=UTF-8' -d '${chat_msg}' '${env.GOOGLE_CHAT_WEBHOOK}' || true"
-                    
-                    // Notificación a Odoo Local (si aplica)
+
                     def odoo_payload = """
                     {
                         "jsonrpc": "2.0", "method": "call",
