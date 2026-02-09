@@ -169,10 +169,10 @@ chmod 666 "/workspace/\$FILENAME"
 
                     if (params.VERSION == 'v15') {
                         target_ip = env.IP_TEST_V15
-                        credential_id = 'ssh-pass-v15' // Asegúrate de crear esta credencial en Jenkins
+                        credential_id = 'ssh-pass-v15' // <--- ID que creaste en Jenkins
                     } else {
                         target_ip = env.IP_TEST_V19
-                        credential_id = 'ssh-pass-v19' // Asegúrate de crear esta credencial en Jenkins
+                        credential_id = 'ssh-pass-v19' // <--- ID que creaste en Jenkins
                     }
 
                     env.FINAL_URL = "https://${env.NEW_DB_NAME}.odooecuador.online/web/login"
@@ -180,22 +180,22 @@ chmod 666 "/workspace/\$FILENAME"
 
                     withCredentials([string(credentialsId: credential_id, variable: 'SSH_PASS')]) {
                         
-                        // Script de despliegue usando usuario 'ubuntu' y 'sudo'
+                        echo "--- Credencial cargada correctamente, generando script... ---"
+
+                        // CORRECCIÓN: Usamos env.SSH_PASS en lugar de SSH_PASS directo
                         def deployScript = """#!/bin/bash
 set -e
 apt-get update -qq && apt-get install -y sshpass openssh-client curl -qq
 
 echo '--- 1. Subiendo archivo a /home/ubuntu (SCP) ---'
-# Copiamos a la carpeta del usuario ubuntu porque no tenemos permiso en /opt directo
-sshpass -p '${SSH_PASS}' scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} ubuntu@${target_ip}:/home/ubuntu/
+# Usamos env.SSH_PASS para que Groovy lo encuentre
+sshpass -p '${env.SSH_PASS}' scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} ubuntu@${target_ip}:/home/ubuntu/
 
 echo '--- 2. Ejecutando comandos remotos (SSH + SUDO) ---'
-sshpass -p '${SSH_PASS}' ssh -o StrictHostKeyChecking=no ubuntu@${target_ip} '
+sshpass -p '${env.SSH_PASS}' ssh -o StrictHostKeyChecking=no ubuntu@${target_ip} '
     
     echo "Moviemiento de archivo..."
-    # Usamos sudo para moverlo a la carpeta protegida
     sudo mv /home/ubuntu/${env.LOCAL_BACKUP_FILE} ${env.BACKUP_DIR_REMOTE}/
-    # Damos permisos de lectura para que Odoo pueda leerlo
     sudo chmod 644 ${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}
 
     echo "Configurando Postgres..."
@@ -204,7 +204,6 @@ sshpass -p '${SSH_PASS}' ssh -o StrictHostKeyChecking=no ubuntu@${target_ip} '
     sudo update-alternatives --set pg_restore /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_restore || true
     
     echo "Restaurando ${env.NEW_DB_NAME}..."
-    # Nota: curl ataca a localhost:8069, no necesita sudo, pero el archivo sí debe ser legible
     curl -k -X POST "http://localhost:8069/web/database/restore" \
         -F "master_pwd=${env.MASTER_PWD}" \
         -F "file=@${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}" \
@@ -218,6 +217,7 @@ sshpass -p '${SSH_PASS}' ssh -o StrictHostKeyChecking=no ubuntu@${target_ip} '
                         writeFile file: 'deploy.sh', text: deployScript
                         sh "chmod +x deploy.sh"
 
+                        echo "--- Ejecutando contenedor de despliegue ---"
                         sh """
                             docker rm -f vpn-deploy || true
                             docker run -d --name vpn-deploy --network container:vpn-sidecar ubuntu:22.04 sleep infinity
