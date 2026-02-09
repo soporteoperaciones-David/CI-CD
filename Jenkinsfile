@@ -10,12 +10,13 @@ pipeline {
     }
 
     environment {
-        // Credenciales Generales
         GOOGLE_CHAT_WEBHOOK = credentials('GOOGLE_CHAT_WEBHOOK')
         
         // IPs de Destino
         IP_TEST_V15 = "148.113.165.227" 
         IP_TEST_V19 = "158.69.210.128"
+        
+        // Rutas
         BACKUP_DIR_REMOTE = "/opt/backup_integralis"
         
         // Odoo Local
@@ -62,7 +63,7 @@ pipeline {
                 script {
                     echo "--- Generando Scripts ---"
                     
-                    // Lógica de Contraseñas Maestras Odoo
+                    // Selección de Password Maestro de la Base de Datos ORIGEN
                     if (params.ODOO_URL.contains('.sdb-integralis360.com')) {
                         env.MASTER_PWD = credentials('vault-sdb-integralis360.com')
                     } else if (params.ODOO_URL.contains('.dic-integralis360.com')) {
@@ -162,46 +163,56 @@ chmod 666 "/workspace/\$FILENAME"
                         if (env.DB_NAME.contains('edb') || env.DB_NAME.contains('cgs')) { env.PG_BIN_VERSION = "17" }
                     }
 
-                    // --- SELECCIÓN DE IP Y CREDENCIAL ---
+                    // --- SELECCIÓN INTELIGENTE DE DESTINO Y CREDENCIAL ---
                     def target_ip = ""
                     def credential_id = ""
 
                     if (params.VERSION == 'v15') {
                         target_ip = env.IP_TEST_V15
-                        credential_id = 'root-pass-v15'  // <--- NUEVA CREDENCIAL QUE VAS A CREAR
+                        credential_id = 'ssh-pass-v15' // Asegúrate de crear esta credencial en Jenkins
                     } else {
                         target_ip = env.IP_TEST_V19
-                        credential_id = 'root-password-prod' // Credencial existente para v19
+                        credential_id = 'ssh-pass-v19' // Asegúrate de crear esta credencial en Jenkins
                     }
 
                     env.FINAL_URL = "https://${env.NEW_DB_NAME}.odooecuador.online/web/login"
+                    echo "--- Destino: ubuntu@${target_ip} ---"
 
-                    echo "Destino: ${target_ip} (${params.VERSION})"
-                    echo "Usando Credencial ID: ${credential_id}"
-
-                    withCredentials([string(credentialsId: credential_id, variable: 'ROOT_PASS')]) {
+                    withCredentials([string(credentialsId: credential_id, variable: 'SSH_PASS')]) {
                         
+                        // Script de despliegue usando usuario 'ubuntu' y 'sudo'
                         def deployScript = """#!/bin/bash
 set -e
 apt-get update -qq && apt-get install -y sshpass openssh-client curl -qq
 
-echo '--- Enviando archivo a ${target_ip} ---'
-sshpass -p '${ROOT_PASS}' scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} root@${target_ip}:${env.BACKUP_DIR_REMOTE}/
+echo '--- 1. Subiendo archivo a /home/ubuntu (SCP) ---'
+# Copiamos a la carpeta del usuario ubuntu porque no tenemos permiso en /opt directo
+sshpass -p '${SSH_PASS}' scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} ubuntu@${target_ip}:/home/ubuntu/
 
-echo '--- Restaurando en remoto ---'
-sshpass -p '${ROOT_PASS}' ssh -o StrictHostKeyChecking=no root@${target_ip} '
-    update-alternatives --set psql /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/psql || true
-    update-alternatives --set pg_dump /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_dump || true
-    update-alternatives --set pg_restore /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_restore || true
+echo '--- 2. Ejecutando comandos remotos (SSH + SUDO) ---'
+sshpass -p '${SSH_PASS}' ssh -o StrictHostKeyChecking=no ubuntu@${target_ip} '
+    
+    echo "Moviemiento de archivo..."
+    # Usamos sudo para moverlo a la carpeta protegida
+    sudo mv /home/ubuntu/${env.LOCAL_BACKUP_FILE} ${env.BACKUP_DIR_REMOTE}/
+    # Damos permisos de lectura para que Odoo pueda leerlo
+    sudo chmod 644 ${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}
+
+    echo "Configurando Postgres..."
+    sudo update-alternatives --set psql /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/psql || true
+    sudo update-alternatives --set pg_dump /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_dump || true
+    sudo update-alternatives --set pg_restore /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_restore || true
     
     echo "Restaurando ${env.NEW_DB_NAME}..."
+    # Nota: curl ataca a localhost:8069, no necesita sudo, pero el archivo sí debe ser legible
     curl -k -X POST "http://localhost:8069/web/database/restore" \
         -F "master_pwd=${env.MASTER_PWD}" \
         -F "file=@${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}" \
         -F "name=${env.NEW_DB_NAME}" \
         -F "copy=true"
     
-    rm -f ${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}
+    echo "Limpiando..."
+    sudo rm -f ${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}
 '
 """
                         writeFile file: 'deploy.sh', text: deployScript
