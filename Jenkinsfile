@@ -28,36 +28,26 @@ pipeline {
                     sh "docker rm -f vpn-sidecar || true"
 
                     echo "--- Preparando Configuración VPN ---"
-                    // El plugin deja el archivo 'pasante.ovpn' en la carpeta actual de Jenkins
                     configFileProvider([configFile(fileId: 'vpn-pasante-file', targetLocation: 'pasante.ovpn')]) {
-                        
                         echo "--- Arrancando Contenedor Zombie ---"
-                        // 1. Iniciamos el contenedor SIN VOLUMENES de configuración.
-                        // Solo sleep infinity para mantenerlo vivo.
                         sh "docker run -d --name vpn-sidecar --cap-add=NET_ADMIN --device /dev/net/tun ubuntu:22.04 sleep infinity"
 
                         echo "--- Instalando OpenVPN ---"
                         sh "docker exec vpn-sidecar apt-get update"
                         sh "docker exec vpn-sidecar apt-get install -y openvpn iproute2 iputils-ping"
 
-                        echo "--- Copiando archivo VPN (Fuerza Bruta) ---"
-                        // 2. Usamos docker cp para meter el archivo que el plugin creó.
-                        // Esto funciona siempre, sin importar rutas o volúmenes.
+                        echo "--- Copiando archivo VPN ---"
                         sh "docker cp pasante.ovpn vpn-sidecar:/etc/openvpn/client.conf"
 
                         echo "--- Iniciando Servicio VPN ---"
-                        // 3. Ejecutamos OpenVPN apuntando al archivo que acabamos de copiar
                         sh "docker exec -d vpn-sidecar openvpn --config /etc/openvpn/client.conf --daemon --log /tmp/vpn.log"
                     }
                     
                     echo "--- Esperando conexión (15s) ---"
                     sleep 15
                     
-                    // 4. Diagnóstico
                     echo "--- Verificando Logs ---"
                     sh "docker exec vpn-sidecar cat /tmp/vpn.log || echo 'No log found'"
-                    
-                    echo "--- Verificando Interfaz ---"
                     sh "docker exec vpn-sidecar ip addr show tun0"
                 }
             }
@@ -90,9 +80,11 @@ except:
 
                     def mainScript = """#!/bin/bash
 set -e
-apt-get update -qq && apt-get install -y curl python3 -qq
+# Instalamos iproute2 para que 'ip addr' funcione
+apt-get update -qq && apt-get install -y curl python3 iproute2 -qq
 
-ifconfig tun0 || ip addr show tun0 || echo '⚠️ No veo tun0'
+echo '--- Verificando túnel ---'
+ip addr show tun0 || echo '⚠️ Alerta: tun0 no visible (pero seguiremos)'
 
 echo '--- Consultando Odoo ---'
 DB_JSON=\$(curl -s -k -X POST "https://${params.ODOO_URL}/web/database/list" \
@@ -111,13 +103,21 @@ DATE=\$(date +%Y%m%d)
 EXT="${params.BACKUP_TYPE == 'zip' ? 'zip' : 'dump'}"
 FILENAME="backup_\${DB_NAME}-\${DATE}.\${EXT}"
 
-echo '--- Descargando ---'
+echo "--- Descargando archivo: \$FILENAME ---"
+# CORRECCIÓN CURL: Usamos --form-string para evitar interpretación de archivos
+# y nos aseguramos de que la URL esté bien formada.
 curl -k -X POST \
-    -F "master_pwd=${env.MASTER_PWD}" \
-    -F "name=\$DB_NAME" \
-    -F "backup_format=${params.BACKUP_TYPE}" \
+    --form-string "master_pwd=${env.MASTER_PWD}" \
+    --form-string "name=\$DB_NAME" \
+    --form-string "backup_format=${params.BACKUP_TYPE}" \
     "https://${params.ODOO_URL}/web/database/backup" \
     -o "/workspace/\$FILENAME"
+
+# Verificamos si descargó algo
+if [ ! -s "/workspace/\$FILENAME" ]; then
+    echo "❌ Error: El archivo descargado está vacío o no existe."
+    exit 1
+fi
 
 echo "\$FILENAME" > /workspace/filename.txt
 echo "\$DB_NAME" > /workspace/dbname.txt
@@ -127,28 +127,20 @@ chmod 666 "/workspace/\$FILENAME"
                     sh "chmod +x download.sh"
 
                     echo "--- Ejecutando Worker ---"
-                    // NOTA: Para el script de descarga, necesitamos meter los scripts también.
-                    // Como el volumen falla, usaremos docker cp también aquí.
                     sh """
-                        # Arrancamos worker dormido unido a la red VPN
                         docker run -d --name vpn-worker --network container:vpn-sidecar ubuntu:22.04 sleep infinity
                         
-                        # Metemos los scripts y preparamos carpeta workspace
                         docker exec vpn-worker mkdir -p /workspace
                         docker cp extract.py vpn-worker:/workspace/
                         docker cp download.sh vpn-worker:/workspace/
                         
-                        # Ejecutamos el script
                         docker exec vpn-worker /workspace/download.sh
                         
-                        # Sacamos los resultados (archivos de texto y backup) hacia Jenkins
                         docker cp vpn-worker:/workspace/filename.txt .
                         docker cp vpn-worker:/workspace/dbname.txt .
-                        # Leemos el nombre del archivo para copiarlo también
                         FILENAME=\$(cat filename.txt)
                         docker cp vpn-worker:/workspace/\$FILENAME .
                         
-                        # Limpiamos worker
                         docker rm -f vpn-worker
                     """
                 }
@@ -199,20 +191,15 @@ sshpass -p '${ROOT_PASS}' ssh -o StrictHostKeyChecking=no root@${target_ip} '
                         writeFile file: 'deploy.sh', text: deployScript
                         sh "chmod +x deploy.sh"
 
-                        // Estrategia CP para el deploy también
                         sh """
-                            # Arrancamos worker dormido
                             docker run -d --name vpn-deploy --network container:vpn-sidecar ubuntu:22.04 sleep infinity
                             
-                            # Preparamos
                             docker exec vpn-deploy mkdir -p /workspace
                             docker cp deploy.sh vpn-deploy:/workspace/
                             docker cp ${env.LOCAL_BACKUP_FILE} vpn-deploy:/workspace/
                             
-                            # Ejecutamos
                             docker exec vpn-deploy /workspace/deploy.sh
                             
-                            # Limpiamos
                             docker rm -f vpn-deploy
                         """
                     }
@@ -225,7 +212,7 @@ sshpass -p '${ROOT_PASS}' ssh -o StrictHostKeyChecking=no root@${target_ip} '
                 script {
                     def chat_msg = """{"text": "✅ *Respaldo Completado*\\n*Base:* ${env.NEW_DB_NAME}\\n*URL:* ${env.FINAL_URL}"}"""
                     sh "curl -X POST -H 'Content-Type: application/json; charset=UTF-8' -d '${chat_msg}' '${env.GOOGLE_CHAT_WEBHOOK}' || true"
-                    
+
                     def odoo_payload = """
                     {
                         "jsonrpc": "2.0", "method": "call",
