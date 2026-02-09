@@ -141,11 +141,9 @@ chmod 666 "/workspace/\$FILENAME"
                     env.LOCAL_BACKUP_FILE = readFile('filename.txt').trim()
                     env.DB_NAME = readFile('dbname.txt').trim()
                     
-                    // --- CORRECCIÓN 1: LIMPIEZA DEL NOMBRE DE LA BD ---
-                    // Quitamos "-ee15" o "-ee" del nombre original si existen
+                    // Limpieza del nombre (quita -ee15)
                     def cleanName = env.DB_NAME.replace("-ee15", "").replace("-ee", "")
                     
-                    // Construimos el nombre nuevo: alianza247 + fecha + version
                     env.NEW_DB_NAME = "${cleanName}-" + sh(returnStdout: true, script: 'date +%Y%m%d').trim() + "-" + ((params.VERSION == 'v15') ? 'ee15n2' : 'ee19')
                     
                     env.PG_BIN_VERSION = "17" 
@@ -154,7 +152,7 @@ chmod 666 "/workspace/\$FILENAME"
                         if (env.DB_NAME.contains('edb') || env.DB_NAME.contains('cgs')) { env.PG_BIN_VERSION = "17" }
                     }
 
-                    // --- SELECCIÓN DE CREDENCIALES ---
+                    // Selección de Credenciales
                     if (params.VERSION == 'v15') {
                         env.TARGET_IP_FINAL = env.IP_TEST_V15
                         env.SELECTED_PASS = env.SSH_PASS_V15 
@@ -168,61 +166,51 @@ chmod 666 "/workspace/\$FILENAME"
                     echo "--- DEBUG INFO ---"
                     echo "IP Destino: ${env.TARGET_IP_FINAL}"
                     echo "Base Nueva: ${env.NEW_DB_NAME}"
-                    echo "Archivo: ${env.LOCAL_BACKUP_FILE}"
 
-                    // --- GENERACIÓN DEL SCRIPT DE DEPLOY ---
-                    
-                    def deployScriptContent = """#!/bin/bash
+                    // --- EJECUCIÓN ---
+                    sh """
+                        cat <<EOF > deploy.sh
+#!/bin/bash
 set -e
 apt-get update -qq && apt-get install -y sshpass openssh-client curl -qq
 
-# Exportamos SSHPASS para que sshpass lo lea de entorno (seguridad contra caracteres especiales)
 export SSHPASS="\$MY_SSH_PASS"
 
-echo "--- 1. Subiendo archivo a /home/ubuntu en ${env.TARGET_IP_FINAL} ---"
+echo "--- 1. Subiendo archivo a ${env.TARGET_IP_FINAL} ---"
 sshpass -e scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} ubuntu@${env.TARGET_IP_FINAL}:/home/ubuntu/
 
-echo "--- 2. Ejecutando operaciones en el servidor remoto ---"
+echo "--- 2. Restaurando en Servidor Remoto ---"
 sshpass -e ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_FINAL} '
     
-    echo ">> Moviendo archivo a /opt/backup_integralis/..."
-    # Usamos sudo para mover y asegurar permisos
+    echo ">> Moviendo archivo..."
     sudo mv /home/ubuntu/${env.LOCAL_BACKUP_FILE} ${env.BACKUP_DIR_REMOTE}/
-    
-    echo ">> Asignando permisos..."
     sudo chmod 644 ${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}
     sudo chown root:root ${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}
 
-    # --- DEBUG: VERIFICAR QUE EL ARCHIVO EXISTE ---
-    echo ">> Verificando archivo en destino:"
+    echo ">> Verificando archivo:"
     ls -lah ${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}
 
-    echo ">> Ajustando versiones de Postgres..."
+    echo ">> Ajustando Postgres..."
     sudo update-alternatives --set psql /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/psql || true
     sudo update-alternatives --set pg_dump /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_dump || true
     sudo update-alternatives --set pg_restore /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_restore || true
     
-    echo ">> Restaurando Odoo (POST a localhost)..."
-    # El archivo debe existir en la ruta absoluta especificada
-    curl -v -k -X POST "http://localhost:8069/web/database/restore" \
+    echo ">> Restaurando Odoo..."
+    # CORRECCIÓN AQUÍ: Agregamos "sudo" al curl para que tenga permiso de leer el archivo root
+    sudo curl -v -k -X POST "http://localhost:8069/web/database/restore" \
         -F "master_pwd=${env.MASTER_PWD}" \
         -F "file=@${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}" \
         -F "name=${env.NEW_DB_NAME}" \
         -F "copy=true" \
         -F "backup_format=dump" 
     
-    echo ">> Proceso remoto finalizado."
-    # --- CORRECCIÓN 3: ELIMINADA LA LÍNEA DE BORRADO (rm) ---
-    # El archivo permanecerá en /opt/backup_integralis/
+    echo ">> Exito. El archivo se mantiene en el servidor."
 '
-"""
-                    // Escribimos el script
-                    writeFile file: 'deploy.sh', text: deployScriptContent
-                    sh "chmod +x deploy.sh"
-
-                    // --- EJECUCIÓN DOCKER ---
-                    sh """
-                        echo "--- Iniciando contenedor de despliegue ---"
+EOF
+                        
+                        chmod +x deploy.sh
+                        
+                        echo "--- Ejecutando Docker ---"
                         docker rm -f vpn-deploy || true
                         
                         docker run -d --name vpn-deploy \\
@@ -234,7 +222,6 @@ sshpass -e ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_FINAL} '
                         docker cp deploy.sh vpn-deploy:/workspace/
                         docker cp ${env.LOCAL_BACKUP_FILE} vpn-deploy:/workspace/
                         
-                        echo "--- Ejecutando script de deploy ---"
                         docker exec vpn-deploy /workspace/deploy.sh
                             
                         docker rm -f vpn-deploy
