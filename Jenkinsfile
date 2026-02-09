@@ -10,11 +10,15 @@ pipeline {
     }
 
     environment {
-        ROOT_PASS_ID = 'root-password-prod' 
+        // Credenciales Generales
         GOOGLE_CHAT_WEBHOOK = credentials('GOOGLE_CHAT_WEBHOOK')
+        
+        // IPs de Destino
         IP_TEST_V15 = "148.113.165.227" 
         IP_TEST_V19 = "158.69.210.128"
         BACKUP_DIR_REMOTE = "/opt/backup_integralis"
+        
+        // Odoo Local
         ODOO_LOCAL_URL = "https://faceable-maddison-unharangued.ngrok-free.dev" 
         ODOO_LOCAL_DB = "prueba"
         ODOO_LOCAL_PASS = credentials('odoo-local-api-key') 
@@ -58,6 +62,7 @@ pipeline {
                 script {
                     echo "--- Generando Scripts ---"
                     
+                    // Lógica de Contraseñas Maestras Odoo
                     if (params.ODOO_URL.contains('.sdb-integralis360.com')) {
                         env.MASTER_PWD = credentials('vault-sdb-integralis360.com')
                     } else if (params.ODOO_URL.contains('.dic-integralis360.com')) {
@@ -83,7 +88,7 @@ set -e
 apt-get update -qq && apt-get install -y curl python3 iproute2 -qq
 
 echo '--- Verificando túnel ---'
-ip addr show tun0 || echo '⚠️ Alerta: tun0 no visible (pero seguiremos)'
+ip addr show tun0 || echo '⚠️ Alerta: tun0 no visible'
 
 echo '--- Consultando Odoo ---'
 DB_JSON=\$(curl -s -k -X POST "https://${params.ODOO_URL}/web/database/list" \
@@ -124,10 +129,7 @@ chmod 666 "/workspace/\$FILENAME"
 
                     echo "--- Ejecutando Worker ---"
                     sh """
-                        # CORRECCIÓN: Limpiamos contenedor viejo antes de crear uno nuevo
                         docker rm -f vpn-worker || true
-                        
-                        # Arrancamos worker dormido unido a la red VPN
                         docker run -d --name vpn-worker --network container:vpn-sidecar ubuntu:22.04 sleep infinity
                         
                         docker exec vpn-worker mkdir -p /workspace
@@ -160,23 +162,37 @@ chmod 666 "/workspace/\$FILENAME"
                         if (env.DB_NAME.contains('edb') || env.DB_NAME.contains('cgs')) { env.PG_BIN_VERSION = "17" }
                     }
 
-                    def target_ip = (params.VERSION == 'v15') ? env.IP_TEST_V15 : env.IP_TEST_V19
+                    // --- SELECCIÓN DE IP Y CREDENCIAL ---
+                    def target_ip = ""
+                    def credential_id = ""
+
+                    if (params.VERSION == 'v15') {
+                        target_ip = env.IP_TEST_V15
+                        credential_id = 'root-pass-v15'  // <--- NUEVA CREDENCIAL QUE VAS A CREAR
+                    } else {
+                        target_ip = env.IP_TEST_V19
+                        credential_id = 'root-password-prod' // Credencial existente para v19
+                    }
+
                     env.FINAL_URL = "https://${env.NEW_DB_NAME}.odooecuador.online/web/login"
 
-                    withCredentials([string(credentialsId: env.ROOT_PASS_ID, variable: 'ROOT_PASS')]) {
+                    echo "Destino: ${target_ip} (${params.VERSION})"
+                    echo "Usando Credencial ID: ${credential_id}"
+
+                    withCredentials([string(credentialsId: credential_id, variable: 'ROOT_PASS')]) {
                         
                         def deployScript = """#!/bin/bash
 set -e
 apt-get update -qq && apt-get install -y sshpass openssh-client curl -qq
 
-echo '--- Enviando archivo ---'
+echo '--- Enviando archivo a ${target_ip} ---'
 sshpass -p '${ROOT_PASS}' scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} root@${target_ip}:${env.BACKUP_DIR_REMOTE}/
 
-echo '--- Restaurando ---'
+echo '--- Restaurando en remoto ---'
 sshpass -p '${ROOT_PASS}' ssh -o StrictHostKeyChecking=no root@${target_ip} '
-    update-alternatives --set psql /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/psql
-    update-alternatives --set pg_dump /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_dump
-    update-alternatives --set pg_restore /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_restore
+    update-alternatives --set psql /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/psql || true
+    update-alternatives --set pg_dump /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_dump || true
+    update-alternatives --set pg_restore /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_restore || true
     
     echo "Restaurando ${env.NEW_DB_NAME}..."
     curl -k -X POST "http://localhost:8069/web/database/restore" \
@@ -192,9 +208,7 @@ sshpass -p '${ROOT_PASS}' ssh -o StrictHostKeyChecking=no root@${target_ip} '
                         sh "chmod +x deploy.sh"
 
                         sh """
-                            # CORRECCIÓN: Limpieza preventiva
                             docker rm -f vpn-deploy || true
-                            
                             docker run -d --name vpn-deploy --network container:vpn-sidecar ubuntu:22.04 sleep infinity
                             
                             docker exec vpn-deploy mkdir -p /workspace
@@ -239,6 +253,8 @@ sshpass -p '${ROOT_PASS}' ssh -o StrictHostKeyChecking=no root@${target_ip} '
         always {
             echo "--- Limpiando Sidecar ---"
             sh "docker rm -f vpn-sidecar || true"
+            sh "docker rm -f vpn-worker || true"
+            sh "docker rm -f vpn-deploy || true"
             cleanWs()
         }
     }
