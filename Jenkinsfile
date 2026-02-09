@@ -51,31 +51,45 @@ pipeline {
         stage('2. Descargar Backup (Vía VPN)') {
             steps {
                 script {
-                    // Selección de Password Maestro
+                    echo "--- Generando Scripts ---"
+                    
+                    // 1. LÓGICA DE SELECCIÓN DE PASSWORD
+                    // Aquí es donde probablemente está el error. 
+                    // Revisa si 'alianza247' usa una de estas credenciales o cae en el 'else'.
+                    
+                    def selected_cred_id = ''
+                    
                     if (params.ODOO_URL.contains('.sdb-integralis360.com')) {
-                        env.MASTER_PWD = credentials('vault-sdb-integralis360.com')
+                        selected_cred_id = 'vault-sdb-integralis360.com'
                     } else if (params.ODOO_URL.contains('.dic-integralis360.com')) {
-                        env.MASTER_PWD = credentials('dic-integralis360.com')
+                        selected_cred_id = 'dic-integralis360.com'
                     } else if (params.ODOO_URL.contains('lns') || params.ODOO_URL.contains('edb') || params.ODOO_URL.contains('cgs')) {
-                            env.MASTER_PWD = credentials('dic-lns') 
+                        selected_cred_id = 'dic-lns'
                     } else {
-                        env.MASTER_PWD = credentials('vault-integralis360.website')
+                        // Si no coincide con nada arriba, usa esta por defecto.
+                        // ¿Es correcta esta clave para alianza247?
+                        selected_cred_id = 'vault-integralis360.website'
                     }
+                    
+                    echo "--- USANDO CREDENCIAL ID: ${selected_cred_id} ---"
+                    env.MASTER_PWD = credentials(selected_cred_id)
 
-                    // Script Python para extraer nombre
+                    // Script Python auxiliar
                     def pyScript = """
 import sys, json
 try:
     data = json.load(sys.stdin)
-    print(data['result'][0])
+    if 'result' in data:
+        print(data['result'][0])
+    else:
+        print("ERROR_JSON")
 except:
-    print("ERROR")
+    print("ERROR_PYTHON")
 """
                     writeFile file: 'extract.py', text: pyScript
 
-                    // Script Bash de descarga
-                    // Usamos \$ para variables internas de bash, y ${env.VAR} para variables de Jenkins
-                    def downloadScriptContent = """#!/bin/bash
+                    // Script de Descarga con VALIDACIÓN DE ERROR
+                    def mainScript = """#!/bin/bash
 set -e
 apt-get update -qq && apt-get install -y curl python3 iproute2 -qq
 
@@ -86,11 +100,17 @@ DB_JSON=\$(curl -s -k -X POST "https://${params.ODOO_URL}/web/database/list" \
     -H "Content-Type: application/json" \
     -d '{"params": {"master_pwd": "${env.MASTER_PWD}"}}')
 
+# Verificamos si la lista de base de datos dio error de acceso tambien
+if echo "\$DB_JSON" | grep -q "Access Denied"; then
+    echo "❌ ERROR FATAL: La contraseña maestra fue rechazada al listar bases de datos."
+    exit 1
+fi
+
 DB_NAME=\$(echo "\$DB_JSON" | python3 /workspace/extract.py)
 echo "Base detectada: \$DB_NAME"
 
-if [ "\$DB_NAME" == "ERROR" ]; then
-    echo "❌ Fallo al leer nombre de BD"
+if [ "\$DB_NAME" == "ERROR_JSON" ] || [ "\$DB_NAME" == "ERROR_PYTHON" ]; then
+    echo "❌ Fallo al leer nombre de BD. Respuesta: \$DB_JSON"
     exit 1
 fi
 
@@ -99,12 +119,22 @@ EXT="${params.BACKUP_TYPE == 'zip' ? 'zip' : 'dump'}"
 FILENAME="backup_\${DB_NAME}-\${DATE}.\${EXT}"
 
 echo "--- Descargando archivo: \$FILENAME ---"
+# Agregamos -v para ver headers y backup_format
 curl -k -X POST \
     --form-string "master_pwd=${env.MASTER_PWD}" \
     --form-string "name=\$DB_NAME" \
     --form-string "backup_format=${params.BACKUP_TYPE}" \
     "https://${params.ODOO_URL}/web/database/backup" \
     -o "/workspace/\$FILENAME"
+
+# --- VALIDACIÓN CRÍTICA ---
+# Si el archivo contiene HTML de error, fallamos.
+if grep -q "Database backup error" "/workspace/\$FILENAME"; then
+    echo "❌ ERROR CRÍTICO: Odoo rechazó la descarga (Access Denied)."
+    echo "🔍 Contenido del archivo descargado:"
+    cat "/workspace/\$FILENAME"
+    exit 1
+fi
 
 if [ ! -s "/workspace/\$FILENAME" ]; then
     echo "❌ Error: El archivo descargado está vacío."
@@ -115,20 +145,25 @@ echo "\$FILENAME" > /workspace/filename.txt
 echo "\$DB_NAME" > /workspace/dbname.txt
 chmod 666 "/workspace/\$FILENAME"
 """
-                    writeFile file: 'download.sh', text: downloadScriptContent
+                    writeFile file: 'download.sh', text: mainScript
                     sh "chmod +x download.sh"
 
+                    echo "--- Ejecutando Worker ---"
                     sh """
                         docker rm -f vpn-worker || true
                         docker run -d --name vpn-worker --network container:vpn-sidecar ubuntu:22.04 sleep infinity
+                        
                         docker exec vpn-worker mkdir -p /workspace
                         docker cp extract.py vpn-worker:/workspace/
                         docker cp download.sh vpn-worker:/workspace/
+                        
                         docker exec vpn-worker /workspace/download.sh
+                        
                         docker cp vpn-worker:/workspace/filename.txt .
                         docker cp vpn-worker:/workspace/dbname.txt .
                         FILENAME=\$(cat filename.txt)
                         docker cp vpn-worker:/workspace/\$FILENAME .
+                        
                         docker rm -f vpn-worker
                     """
                 }
