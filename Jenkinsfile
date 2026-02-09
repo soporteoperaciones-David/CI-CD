@@ -151,7 +151,6 @@ chmod 666 "/workspace/\$FILENAME"
                         if (env.DB_NAME.contains('edb') || env.DB_NAME.contains('cgs')) { env.PG_BIN_VERSION = "17" }
                     }
 
-                    // Credenciales
                     if (params.VERSION == 'v15') {
                         env.TARGET_IP_FINAL = env.IP_TEST_V15
                         env.SELECTED_PASS = env.SSH_PASS_V15 
@@ -165,8 +164,7 @@ chmod 666 "/workspace/\$FILENAME"
                     echo "--- DEBUG INFO ---"
                     echo "IP Destino: ${env.TARGET_IP_FINAL}"
 
-                    // --- SCRIPT CON HEREDOC (Adiós error de comillas) ---
-                    // Usamos 'sudo bash -s' para que lea los comandos que le enviamos
+                    // --- SCRIPT CORREGIDO: CD + CURL LOCAL ---
                     
                     def deployScriptContent = """#!/bin/bash
 set -e
@@ -176,41 +174,43 @@ export SSHPASS="\$MY_SSH_PASS"
 echo "--- 1. Subiendo archivo a /home/ubuntu ---"
 sshpass -e scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} ubuntu@${env.TARGET_IP_FINAL}:/home/ubuntu/
 
-echo "--- 2. Ejecutando Modo ROOT (Heredoc) ---"
+echo "--- 2. Conectando y Ejecutando (Modo Root) ---"
+# Usamos 'sudo bash -s' para tener permisos totales (Root)
+# Usamos <<'EOF' para evitar problemas de comillas
+sshpass -e ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_FINAL} 'sudo bash -s' <<'EOF'
 
-# ESTA ES LA SOLUCIÓN:
-# Usamos <<'ENDSSH' para enviar el bloque de código sin conflictos de comillas.
-# Todo lo que esté entre aquí y ENDSSH se ejecutará en el servidor remoto como ROOT.
-
-sshpass -e ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_FINAL} 'sudo bash -s' <<'ENDSSH'
-
-    echo ">> SOY EL USUARIO: \$(whoami) (Debe ser root)"
-    
-    # 1. Movemos el archivo (Como somos root, no hay restricción)
-    echo ">> Moviendo archivo a /opt/backup_integralis/..."
-    mv /home/ubuntu/${env.LOCAL_BACKUP_FILE} ${env.BACKUP_DIR_REMOTE}/
-    
-    # 2. Permisos totales para evitar problemas
-    chmod 777 ${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}
-    
-    # 3. Ajustamos Postgres
+    # Ajustamos Postgres primero
     echo ">> Ajustando Postgres..."
     update-alternatives --set psql /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/psql || true
     update-alternatives --set pg_dump /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_dump || true
     update-alternatives --set pg_restore /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_restore || true
     
-    # 4. Restauramos (Siendo root, curl no falla al leer el archivo)
-    echo ">> Restaurando Odoo..."
+    # MOVER Y ENTRAR A LA CARPETA
+    echo ">> Moviendo archivo a /opt/backup_integralis/..."
+    mv /home/ubuntu/${env.LOCAL_BACKUP_FILE} ${env.BACKUP_DIR_REMOTE}/
     
+    echo ">> Entrando a la carpeta..."
+    cd ${env.BACKUP_DIR_REMOTE}/
+    
+    # Aseguramos permisos (por si acaso)
+    chmod 644 ${env.LOCAL_BACKUP_FILE}
+    
+    echo ">> Restaurando Odoo (Desde directorio actual)..."
+    
+    # Ejecutamos CURL usando el archivo local (@${env.LOCAL_BACKUP_FILE})
+    # Usamos http://localhost:8069 ya que estamos dentro del servidor
     curl -v -k -X POST "http://localhost:8069/web/database/restore" \\
         -F "master_pwd=${env.MASTER_PWD}" \\
-        -F "file=@${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}" \\
+        -F "file=@${env.LOCAL_BACKUP_FILE}" \\
         -F "name=${env.NEW_DB_NAME}" \\
         -F "copy=true"
 
-    echo ">> Base restaurada. Verificando archivo:"
-    ls -lah ${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}
-ENDSSH
+    echo ">> Verificando archivo final:"
+    ls -lah ${env.LOCAL_BACKUP_FILE}
+    
+    echo ">> Proceso Terminado."
+
+EOF
 """
                     writeFile file: 'deploy.sh', text: deployScriptContent
                     sh "chmod +x deploy.sh"
@@ -225,7 +225,10 @@ ENDSSH
                         docker exec vpn-deploy mkdir -p /workspace
                         docker cp deploy.sh vpn-deploy:/workspace/
                         docker cp ${env.LOCAL_BACKUP_FILE} vpn-deploy:/workspace/
+                        
+                        echo "--- Ejecutando Script ---"
                         docker exec vpn-deploy /workspace/deploy.sh
+                            
                         docker rm -f vpn-deploy
                     """
                 }
