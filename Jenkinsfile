@@ -153,6 +153,7 @@ chmod 666 "/workspace/\$FILENAME"
         stage('3. Enviar y Restaurar (Vía VPN)') {
             steps {
                 script {
+                    // 1. Preparar nombres de archivos
                     env.LOCAL_BACKUP_FILE = readFile('filename.txt').trim()
                     env.DB_NAME = readFile('dbname.txt').trim()
                     env.NEW_DB_NAME = "${env.DB_NAME}-" + sh(returnStdout: true, script: 'date +%Y%m%d').trim() + "-" + ((params.VERSION == 'v15') ? 'ee15n2' : 'ee19')
@@ -163,75 +164,69 @@ chmod 666 "/workspace/\$FILENAME"
                         if (env.DB_NAME.contains('edb') || env.DB_NAME.contains('cgs')) { env.PG_BIN_VERSION = "17" }
                     }
 
-                    // Selección de Destino
-                    def target_ip = ""
-                    def credential_id = ""
-
+                    // 2. Selección de Destino y Credencial (Usando ENV para evitar errores de scope)
                     if (params.VERSION == 'v15') {
-                        target_ip = env.IP_TEST_V15
-                        credential_id = 'ssh-pass-v15' 
+                        env.TARGET_IP_FINAL = env.IP_TEST_V15
+                        env.CRED_ID_FINAL = 'ssh-pass-v15' // <--- Asegúrate que este ID exista en Jenkins
                     } else {
-                        target_ip = env.IP_TEST_V19
-                        credential_id = 'ssh-pass-v19' 
+                        env.TARGET_IP_FINAL = env.IP_TEST_V19
+                        env.CRED_ID_FINAL = 'ssh-pass-v19' // <--- Asegúrate que este ID exista en Jenkins
                     }
 
                     env.FINAL_URL = "https://${env.NEW_DB_NAME}.odooecuador.online/web/login"
-                    echo "--- Destino: ubuntu@${target_ip} ---"
+                    
+                    // DEBUG: Ahora usamos env.* para asegurar que las variables existen
                     echo "--- DEBUG INFO ---"
-                    echo "IP Destino: ${target_ip}"
-                    echo "ID Credencial a usar: ${my_cred_id}"
-                    echo "Archivo: ${env.LOCAL_BACKUP_FILE}"
+                    echo "IP Destino: ${env.TARGET_IP_FINAL}"
+                    echo "ID Credencial: ${env.CRED_ID_FINAL}"
                     echo "------------------"
-                    withCredentials([string(credentialsId: credential_id, variable: 'SSH_PASS')]) {
-                        
-                        echo "--- Generando script de despliegue ---"
 
-                        // IMPORTANTE: Fíjate que usamos \$SSH_PASS (con barra invertida).
-                        // Esto evita que Jenkins intente leer la variable aquí y falle.
+                    // 3. Bloque de Credenciales
+                    // Usamos env.CRED_ID_FINAL para llamar a la credencial
+                    withCredentials([string(credentialsId: env.CRED_ID_FINAL, variable: 'MY_SSH_PASS')]) {
+                        
+                        echo "--- Credencial cargada! Generando script... ---"
+
                         def deployScript = """#!/bin/bash
 set -e
 apt-get update -qq && apt-get install -y sshpass openssh-client curl -qq
 
 echo "--- 1. Subiendo archivo a /home/ubuntu ---"
-# El script leerá la variable de entorno del sistema, no del archivo
-sshpass -p "\$SSH_PASS" scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} ubuntu@${target_ip}:/home/ubuntu/
+# Leemos la variable de entorno \$PASS_ARG
+sshpass -p "\$PASS_ARG" scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} ubuntu@${env.TARGET_IP_FINAL}:/home/ubuntu/
 
 echo "--- 2. Ejecutando restauración remota ---"
-sshpass -p "\$SSH_PASS" ssh -o StrictHostKeyChecking=no ubuntu@${target_ip} '
-    
-    echo "Moviendo archivo a carpeta protegida..."
+sshpass -p "\$PASS_ARG" ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_FINAL} '
+    echo "Moviendo archivo..."
     sudo mv /home/ubuntu/${env.LOCAL_BACKUP_FILE} ${env.BACKUP_DIR_REMOTE}/
     sudo chmod 644 ${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}
 
-    echo "Ajustando versiones de Postgres..."
+    echo "Ajustando Postgres..."
     sudo update-alternatives --set psql /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/psql || true
     sudo update-alternatives --set pg_dump /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_dump || true
     sudo update-alternatives --set pg_restore /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_restore || true
     
-    echo "Llamando a Odoo Restore..."
+    echo "Restaurando Odoo..."
     curl -k -X POST "http://localhost:8069/web/database/restore" \
         -F "master_pwd=${env.MASTER_PWD}" \
         -F "file=@${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}" \
         -F "name=${env.NEW_DB_NAME}" \
         -F "copy=true"
     
-    echo "Limpiando archivo remoto..."
+    echo "Limpiando..."
     sudo rm -f ${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}
 '
 """
                         writeFile file: 'deploy.sh', text: deployScript
                         sh "chmod +x deploy.sh"
 
-                        echo "--- Ejecutando contenedor ---"
+                        echo "--- Ejecutando Contenedor ---"
                         
-                        // AQUÍ OCURRE LA MAGIA:
-                        // Pasamos la variable de Jenkins (${SSH_PASS}) al contenedor (-e SSH_PASS=...)
-                        // Usamos comillas dobles en el sh """ ... """ para que Jenkins pueda inyectar el valor.
                         sh """
                             docker rm -f vpn-deploy || true
                             
                             docker run -d --name vpn-deploy \
-                                -e SSH_PASS="${SSH_PASS}" \
+                                -e PASS_ARG='${env.MY_SSH_PASS}' \
                                 --network container:vpn-sidecar \
                                 ubuntu:22.04 sleep infinity
                             
