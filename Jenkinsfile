@@ -180,19 +180,29 @@ chmod 666 "/workspace/\$FILENAME"
                     def cleanName = env.DB_NAME.replace("-ee15", "").replace("-ee", "")
                     env.NEW_DB_NAME = "${cleanName}-" + sh(returnStdout: true, script: 'date +%Y%m%d').trim() + "-" + ((params.VERSION == 'v15') ? 'ee15n2' : 'ee19')
                     
+                    // --- SELECCIÓN DINÁMICA DE CREDENCIALES ---
+                    def target_master_cred_id = ''
+                    
                     if (params.VERSION == 'v15') {
                         env.TARGET_IP_FINAL = env.IP_TEST_V15
-                        env.SELECTED_PASS = env.SSH_PASS_V15 
+                        env.SELECTED_PASS = env.SSH_PASS_V15
+                        // ID de la credencial que acabas de crear en Jenkins para V15
+                        target_master_cred_id = 'master-pwd-v15-test' 
                     } else {
                         env.TARGET_IP_FINAL = env.IP_TEST_V19
                         env.SELECTED_PASS = env.SSH_PASS_V19
+                        // ID para V19 (puede ser el mismo si usan la misma clave)
+                        target_master_cred_id = 'master-pwd-v19-test' 
                     }
+
+                    // Leemos la credencial de forma segura
+                    env.TARGET_MASTER_PWD = credentials(target_master_cred_id)
 
                     env.FINAL_URL = "https://${env.NEW_DB_NAME}.odooecuador.online/web/login"
                     
                     echo "--- DEBUG INFO ---"
                     echo "Método: CURL (Universal)"
-                    echo "Parámetro corregido: backup_file"
+                    echo "Usando Credencial ID: ${target_master_cred_id}"
 
                     def deployScriptContent = """#!/bin/bash
 set -e
@@ -209,43 +219,39 @@ sshpass -e ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_FINAL} 'sudo b
     FILE_PATH="/home/ubuntu/${env.LOCAL_BACKUP_FILE}"
     DB_NAME="${env.NEW_DB_NAME}"
     
-    # Asegurar permisos de lectura para que curl no falle
+    # Asegurar permisos
     chmod 644 \$FILE_PATH
     
-    # (OPCIONAL) Limpieza preventiva:
-    # Si la base ya existe "a medias" por un intento fallido, el curl fallará.
-    # Intentamos borrarla primero para asegurar que el restore entra limpio.
+    # Limpieza preventiva
     sudo -u postgres dropdb \$DB_NAME --if-exists || true
     
-    echo ">> Ejecutando CURL contra localhost:8069..."
-    echo ">> Archivo: \$FILE_PATH"
+    echo ">> Ejecutando CURL..."
     
-    # --- COMANDO CURL CORREGIDO ---
-    # 1. Usamos 'backup_file' (según tu formulario HTML).
-    # 2. Usamos 'copy=true' (porque es un .dump y lo requiere).
-    # 3. Guardamos la respuesta en un log para ver si hay error.
+    # --- CURL ---
+    # Usamos backup_file (correcto) y la password inyectada por Jenkins
     
     curl -v -X POST "http://localhost:8069/web/database/restore" \\
-        -F "master_pwd=${env.MASTER_PWD}" \\
+        -F "master_pwd=${env.TARGET_MASTER_PWD}" \\
         -F "backup_file=@\$FILE_PATH" \\
         -F "name=\$DB_NAME" \\
         -F "copy=true" \\
         -o /tmp/restore_response.html
     
-    # Verificamos si la respuesta contiene "error"
+    # Verificación de respuesta
     if grep -q "error" /tmp/restore_response.html; then
-        echo "⚠️ ALERTA: El servidor respondió con posible error. Revisando:"
+        echo "⚠️ ALERTA: Respuesta del servidor:"
         grep -o 'class="alert alert-danger">.*</div>' /tmp/restore_response.html || head -n 20 /tmp/restore_response.html
         
-        # Si dice "Postgres subprocess error 1", generalmente es porque la base ya existía
-        # o por conflicto de versiones, pero con el dropdb previo debería pasar.
+        if grep -q "Access Denied" /tmp/restore_response.html; then
+            echo "❌ Error: La contraseña maestra configurada en Jenkins es incorrecta."
+            exit 1
+        fi
     else
-        echo "✅ Restauración Web completada correctamente."
+        echo "✅ Restauración completada."
     fi
     
-    # Limpieza
     rm -f \$FILE_PATH
-    echo ">> Fin del proceso."
+    echo ">> Fin."
 EOF
 """
                     writeFile file: 'deploy.sh', text: deployScriptContent
