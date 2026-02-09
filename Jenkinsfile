@@ -141,9 +141,8 @@ chmod 666 "/workspace/\$FILENAME"
                     env.LOCAL_BACKUP_FILE = readFile('filename.txt').trim()
                     env.DB_NAME = readFile('dbname.txt').trim()
                     
-                    // Limpieza del nombre (quita -ee15)
+                    // Limpieza del nombre
                     def cleanName = env.DB_NAME.replace("-ee15", "").replace("-ee", "")
-                    
                     env.NEW_DB_NAME = "${cleanName}-" + sh(returnStdout: true, script: 'date +%Y%m%d').trim() + "-" + ((params.VERSION == 'v15') ? 'ee15n2' : 'ee19')
                     
                     env.PG_BIN_VERSION = "17" 
@@ -165,18 +164,20 @@ chmod 666 "/workspace/\$FILENAME"
                     
                     echo "--- DEBUG INFO ---"
                     echo "IP Destino: ${env.TARGET_IP_FINAL}"
-                    echo "Base Nueva: ${env.NEW_DB_NAME}"
 
-                    // --- EJECUCIÓN ---
-                    sh """
-                        cat <<EOF > deploy.sh
-#!/bin/bash
+                    // --- GENERACIÓN DEL SCRIPT (USANDO writeFile PARA EVITAR ERRORES) ---
+                    
+                    def deployScriptContent = """#!/bin/bash
 set -e
 apt-get update -qq && apt-get install -y sshpass openssh-client curl -qq
 
+# --- LA SOLUCIÓN DEFINITIVA PARA CARACTERES ESPECIALES ---
+# 1. Exportamos la variable SSHPASS leyendo la variable que inyectamos desde Docker
+# El '\\' antes del signo de dolar es para que Groovy no lo borre.
 export SSHPASS="\$MY_SSH_PASS"
 
 echo "--- 1. Subiendo archivo a ${env.TARGET_IP_FINAL} ---"
+# 2. Usamos la bandera '-e'. Esto obliga a leer la contraseña de la variable exportada arriba.
 sshpass -e scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} ubuntu@${env.TARGET_IP_FINAL}:/home/ubuntu/
 
 echo "--- 2. Restaurando en Servidor Remoto ---"
@@ -196,7 +197,7 @@ sshpass -e ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_FINAL} '
     sudo update-alternatives --set pg_restore /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_restore || true
     
     echo ">> Restaurando Odoo..."
-    # CORRECCIÓN AQUÍ: Agregamos "sudo" al curl para que tenga permiso de leer el archivo root
+    # Agregamos SUDO al curl para evitar error de permisos de lectura (Error 26)
     sudo curl -v -k -X POST "http://localhost:8069/web/database/restore" \
         -F "master_pwd=${env.MASTER_PWD}" \
         -F "file=@${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}" \
@@ -204,15 +205,19 @@ sshpass -e ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_FINAL} '
         -F "copy=true" \
         -F "backup_format=dump" 
     
-    echo ">> Exito. El archivo se mantiene en el servidor."
+    echo ">> Exito."
 '
-EOF
-                        
-                        chmod +x deploy.sh
-                        
-                        echo "--- Ejecutando Docker ---"
+"""
+                    // Escribimos el archivo en el disco de Jenkins
+                    writeFile file: 'deploy.sh', text: deployScriptContent
+                    sh "chmod +x deploy.sh"
+
+                    // --- EJECUCIÓN DOCKER ---
+                    sh """
+                        echo "--- Iniciando contenedor ---"
                         docker rm -f vpn-deploy || true
                         
+                        # Inyectamos la contraseña. Docker la recibirá intacta.
                         docker run -d --name vpn-deploy \\
                             -e MY_SSH_PASS="${env.SELECTED_PASS}" \\
                             --network container:vpn-sidecar \\
@@ -222,6 +227,7 @@ EOF
                         docker cp deploy.sh vpn-deploy:/workspace/
                         docker cp ${env.LOCAL_BACKUP_FILE} vpn-deploy:/workspace/
                         
+                        echo "--- Ejecutando Script ---"
                         docker exec vpn-deploy /workspace/deploy.sh
                             
                         docker rm -f vpn-deploy
