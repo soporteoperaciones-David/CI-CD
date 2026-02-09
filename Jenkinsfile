@@ -141,9 +141,8 @@ chmod 666 "/workspace/\$FILENAME"
                     env.LOCAL_BACKUP_FILE = readFile('filename.txt').trim()
                     env.DB_NAME = readFile('dbname.txt').trim()
                     
-                    // Limpieza del nombre (quita -ee15)
+                    // Limpieza del nombre
                     def cleanName = env.DB_NAME.replace("-ee15", "").replace("-ee", "")
-                    
                     env.NEW_DB_NAME = "${cleanName}-" + sh(returnStdout: true, script: 'date +%Y%m%d').trim() + "-" + ((params.VERSION == 'v15') ? 'ee15n2' : 'ee19')
                     
                     env.PG_BIN_VERSION = "17" 
@@ -152,7 +151,7 @@ chmod 666 "/workspace/\$FILENAME"
                         if (env.DB_NAME.contains('edb') || env.DB_NAME.contains('cgs')) { env.PG_BIN_VERSION = "17" }
                     }
 
-                    // Selección de Credenciales
+                    // Credenciales
                     if (params.VERSION == 'v15') {
                         env.TARGET_IP_FINAL = env.IP_TEST_V15
                         env.SELECTED_PASS = env.SSH_PASS_V15 
@@ -163,16 +162,10 @@ chmod 666 "/workspace/\$FILENAME"
 
                     env.FINAL_URL = "https://${env.NEW_DB_NAME}.odooecuador.online/web/login"
                     
-                    echo "--- DEBUG INFO ---"
-                    echo "IP Destino: ${env.TARGET_IP_FINAL}"
-                    echo "Base Nueva: ${env.NEW_DB_NAME}"
-
-                    // --- GENERACIÓN DEL SCRIPT ---
+                    // --- SCRIPT CORREGIDO: ORDEN LOGICO ---
                     def deployScriptContent = """#!/bin/bash
 set -e
 apt-get update -qq && apt-get install -y sshpass openssh-client curl -qq
-
-# Exportamos para sshpass
 export SSHPASS="\$MY_SSH_PASS"
 
 echo "--- 1. Subiendo archivo a /home/ubuntu ---"
@@ -181,15 +174,14 @@ sshpass -e scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} u
 echo "--- 2. Ejecutando en Servidor Remoto ---"
 sshpass -e ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_FINAL} '
     
-    # A. Ajustamos versiones de Postgres
     echo ">> Ajustando Postgres..."
     sudo update-alternatives --set psql /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/psql || true
     sudo update-alternatives --set pg_dump /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_dump || true
     sudo update-alternatives --set pg_restore /usr/lib/postgresql/${env.PG_BIN_VERSION}/bin/pg_restore || true
     
-    # B. RESTAURAMOS DESDE EL HOME (Solución al Error 26)
-    # Al leer desde /home/ubuntu/, el usuario tiene permisos y curl no falla.
-    # Quitamos backup_format=dump ya que Odoo lo detecta solo.
+    # --- CAMBIO AQUÍ: RESTAURAMOS PRIMERO (DESDE EL HOME) ---
+    # El archivo está en /home/ubuntu/, el usuario "ubuntu" SÍ tiene permiso de leerlo aquí.
+    # Usamos el comando original SIN backup_format como pediste.
     
     echo ">> Restaurando Odoo..."
     curl -v -k -X POST "http://localhost:8069/web/database/restore" \\
@@ -198,7 +190,7 @@ sshpass -e ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_FINAL} '
         -F "name=${env.NEW_DB_NAME}" \\
         -F "copy=true"
 
-    # C. Guardamos el archivo en /opt DESPUÉS de restaurar
+    # --- LUEGO LO GUARDAMOS EN LA CARPETA PROTEGIDA ---
     echo ">> Guardando respaldo en /opt/backup_integralis/..."
     sudo mv /home/ubuntu/${env.LOCAL_BACKUP_FILE} ${env.BACKUP_DIR_REMOTE}/
     sudo chmod 644 ${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}
@@ -213,11 +205,8 @@ sshpass -e ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_FINAL} '
                     writeFile file: 'deploy.sh', text: deployScriptContent
                     sh "chmod +x deploy.sh"
 
-                    // --- EJECUCIÓN DOCKER ---
                     sh """
-                        echo "--- Iniciando contenedor ---"
                         docker rm -f vpn-deploy || true
-                        
                         docker run -d --name vpn-deploy \\
                             -e MY_SSH_PASS="${env.SELECTED_PASS}" \\
                             --network container:vpn-sidecar \\
@@ -226,10 +215,7 @@ sshpass -e ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_FINAL} '
                         docker exec vpn-deploy mkdir -p /workspace
                         docker cp deploy.sh vpn-deploy:/workspace/
                         docker cp ${env.LOCAL_BACKUP_FILE} vpn-deploy:/workspace/
-                        
-                        echo "--- Ejecutando Script ---"
                         docker exec vpn-deploy /workspace/deploy.sh
-                            
                         docker rm -f vpn-deploy
                     """
                 }
