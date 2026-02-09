@@ -153,7 +153,7 @@ chmod 666 "/workspace/\$FILENAME"
         stage('3. Enviar y Restaurar (Vía VPN)') {
             steps {
                 script {
-                    // 1. Preparar nombres de archivos
+                    // 1. Preparación de variables
                     env.LOCAL_BACKUP_FILE = readFile('filename.txt').trim()
                     env.DB_NAME = readFile('dbname.txt').trim()
                     env.NEW_DB_NAME = "${env.DB_NAME}-" + sh(returnStdout: true, script: 'date +%Y%m%d').trim() + "-" + ((params.VERSION == 'v15') ? 'ee15n2' : 'ee19')
@@ -164,35 +164,34 @@ chmod 666 "/workspace/\$FILENAME"
                         if (env.DB_NAME.contains('edb') || env.DB_NAME.contains('cgs')) { env.PG_BIN_VERSION = "17" }
                     }
 
-                    // 2. Selección de Destino y Credencial (Usando ENV para evitar errores de scope)
+                    // 2. Selección de Destino
                     if (params.VERSION == 'v15') {
                         env.TARGET_IP_FINAL = env.IP_TEST_V15
-                        env.CRED_ID_FINAL = 'ssh-pass-v15' // <--- Asegúrate que este ID exista en Jenkins
+                        env.CRED_ID_FINAL = 'ssh-pass-v15' 
                     } else {
                         env.TARGET_IP_FINAL = env.IP_TEST_V19
-                        env.CRED_ID_FINAL = 'ssh-pass-v19' // <--- Asegúrate que este ID exista en Jenkins
+                        env.CRED_ID_FINAL = 'ssh-pass-v19' 
                     }
 
                     env.FINAL_URL = "https://${env.NEW_DB_NAME}.odooecuador.online/web/login"
                     
-                    // DEBUG: Ahora usamos env.* para asegurar que las variables existen
                     echo "--- DEBUG INFO ---"
                     echo "IP Destino: ${env.TARGET_IP_FINAL}"
                     echo "ID Credencial: ${env.CRED_ID_FINAL}"
                     echo "------------------"
 
-                    // 3. Bloque de Credenciales
-                    // Usamos env.CRED_ID_FINAL para llamar a la credencial
+                    // 3. Bloque Crítico
                     withCredentials([string(credentialsId: env.CRED_ID_FINAL, variable: 'MY_SSH_PASS')]) {
                         
-                        echo "--- Credencial cargada! Generando script... ---"
+                        // Si ves este mensaje, entramos al bloque con éxito
+                        echo ">>> DENTRO DEL BLOQUE DE CREDENCIALES <<<"
 
                         def deployScript = """#!/bin/bash
 set -e
 apt-get update -qq && apt-get install -y sshpass openssh-client curl -qq
 
 echo "--- 1. Subiendo archivo a /home/ubuntu ---"
-# Leemos la variable de entorno \$PASS_ARG
+# Aquí usamos la variable de entorno interna del contenedor
 sshpass -p "\$PASS_ARG" scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} ubuntu@${env.TARGET_IP_FINAL}:/home/ubuntu/
 
 echo "--- 2. Ejecutando restauración remota ---"
@@ -220,13 +219,16 @@ sshpass -p "\$PASS_ARG" ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_F
                         writeFile file: 'deploy.sh', text: deployScript
                         sh "chmod +x deploy.sh"
 
-                        echo "--- Ejecutando Contenedor ---"
+                        echo "--- Ejecutando Contenedor Docker ---"
                         
+                        // CORRECCIÓN VITAL AQUÍ ABAJO:
+                        // Usamos "\$MY_SSH_PASS" (con barra invertida).
+                        // Esto hace que Groovy lo ignore y Bash lo tome directamente del entorno inyectado.
                         sh """
                             docker rm -f vpn-deploy || true
                             
                             docker run -d --name vpn-deploy \
-                                -e PASS_ARG='${env.MY_SSH_PASS}' \
+                                -e PASS_ARG="\$MY_SSH_PASS" \
                                 --network container:vpn-sidecar \
                                 ubuntu:22.04 sleep infinity
                             
