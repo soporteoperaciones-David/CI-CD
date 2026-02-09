@@ -10,13 +10,15 @@ pipeline {
     }
 
     environment {
-        GOOGLE_CHAT_WEBHOOK = credentials('GOOGLE_CHAT_WEBHOOK')
+        // --- 1. CARGA DE CREDENCIALES GLOBAL (SIN BLOQUES ANIDADOS) ---
+        // Al definirlas aquí, Jenkins las maneja automáticamente como variables de entorno enmascaradas.
+        PASS_V15 = credentials('ssh-pass-v15') 
+        PASS_V19 = credentials('ssh-pass-v19')
         
-        // IPs de Destino
+        // Otras vars
+        GOOGLE_CHAT_WEBHOOK = credentials('GOOGLE_CHAT_WEBHOOK')
         IP_TEST_V15 = "148.113.165.227" 
         IP_TEST_V19 = "158.69.210.128"
-        
-        // Rutas
         BACKUP_DIR_REMOTE = "/opt/backup_integralis"
         
         // Odoo Local
@@ -63,7 +65,6 @@ pipeline {
                 script {
                     echo "--- Generando Scripts ---"
                     
-                    // Selección de Password Maestro de la Base de Datos ORIGEN
                     if (params.ODOO_URL.contains('.sdb-integralis360.com')) {
                         env.MASTER_PWD = credentials('vault-sdb-integralis360.com')
                     } else if (params.ODOO_URL.contains('.dic-integralis360.com')) {
@@ -150,10 +151,10 @@ chmod 666 "/workspace/\$FILENAME"
             }
         }
 
-        stage('3. Enviar y Restaurar (Vía VPN)') {
+       stage('3. Enviar y Restaurar (Vía VPN)') {
             steps {
                 script {
-                    // 1. Preparación de variables
+                    // --- PREPARACIÓN DE VARIABLES ---
                     env.LOCAL_BACKUP_FILE = readFile('filename.txt').trim()
                     env.DB_NAME = readFile('dbname.txt').trim()
                     env.NEW_DB_NAME = "${env.DB_NAME}-" + sh(returnStdout: true, script: 'date +%Y%m%d').trim() + "-" + ((params.VERSION == 'v15') ? 'ee15n2' : 'ee19')
@@ -164,38 +165,40 @@ chmod 666 "/workspace/\$FILENAME"
                         if (env.DB_NAME.contains('edb') || env.DB_NAME.contains('cgs')) { env.PG_BIN_VERSION = "17" }
                     }
 
-                    // 2. Selección de Destino
+                    // --- SELECCIÓN DE CREDENCIALES YA CARGADAS ---
+                    // No usamos withCredentials. Usamos las variables del environment {}
                     if (params.VERSION == 'v15') {
                         env.TARGET_IP_FINAL = env.IP_TEST_V15
-                        env.CRED_ID_FINAL = 'ssh-pass-v15' 
+                        env.SELECTED_PASS = env.PASS_V15  // <-- ¡Directo del environment!
                     } else {
                         env.TARGET_IP_FINAL = env.IP_TEST_V19
-                        env.CRED_ID_FINAL = 'ssh-pass-v19' 
+                        env.SELECTED_PASS = env.PASS_V19  // <-- ¡Directo del environment!
                     }
 
                     env.FINAL_URL = "https://${env.NEW_DB_NAME}.odooecuador.online/web/login"
                     
                     echo "--- DEBUG INFO ---"
-                    echo "IP Destino: ${env.TARGET_IP_FINAL}"
-                    echo "ID Credencial: ${env.CRED_ID_FINAL}"
-                    echo "------------------"
+                    echo "IP: ${env.TARGET_IP_FINAL}"
+                    echo "Usando Credencial Global."
 
-                    // 3. Bloque Crítico
-                    withCredentials([string(credentialsId: env.CRED_ID_FINAL, variable: 'MY_SSH_PASS')]) {
+                    // --- EJECUCIÓN (Modo Linux Nativo sin Groovy Interpolation compleja) ---
+                    // Usamos sh """ ... """ para poder inyectar ${env.SELECTED_PASS} en el comando docker run
+                    sh """
+                        # 1. Creamos el script deploy.sh
+                        # Usamos \\ (doble escape) para variables que queremos que BASH resuelva (como \$1)
+                        # Usamos \${VAR} normal para variables que JENKINS inyecta ahora
                         
-                        // Si ves este mensaje, entramos al bloque con éxito
-                        echo ">>> DENTRO DEL BLOQUE DE CREDENCIALES <<<"
-
-                        def deployScript = """#!/bin/bash
+                        cat <<EOF > deploy.sh
+#!/bin/bash
 set -e
 apt-get update -qq && apt-get install -y sshpass openssh-client curl -qq
 
-echo "--- 1. Subiendo archivo a /home/ubuntu ---"
-# Aquí usamos la variable de entorno interna del contenedor
-sshpass -p "\$PASS_ARG" scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} ubuntu@${env.TARGET_IP_FINAL}:/home/ubuntu/
+echo "--- Subiendo archivo a ${env.TARGET_IP_FINAL} ---"
+# Leemos la variable de entorno interna del contenedor
+sshpass -p "\$MY_SSH_PASS" scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} ubuntu@${env.TARGET_IP_FINAL}:/home/ubuntu/
 
-echo "--- 2. Ejecutando restauración remota ---"
-sshpass -p "\$PASS_ARG" ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_FINAL} '
+echo "--- Ejecutando comandos remotos ---"
+sshpass -p "\$MY_SSH_PASS" ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_FINAL} '
     echo "Moviendo archivo..."
     sudo mv /home/ubuntu/${env.LOCAL_BACKUP_FILE} ${env.BACKUP_DIR_REMOTE}/
     sudo chmod 644 ${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}
@@ -215,32 +218,31 @@ sshpass -p "\$PASS_ARG" ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_F
     echo "Limpiando..."
     sudo rm -f ${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}
 '
-"""
-                        writeFile file: 'deploy.sh', text: deployScript
-                        sh "chmod +x deploy.sh"
-
-                        echo "--- Ejecutando Contenedor Docker ---"
+EOF
                         
-                        // CORRECCIÓN VITAL AQUÍ ABAJO:
-                        // Usamos "\$MY_SSH_PASS" (con barra invertida).
-                        // Esto hace que Groovy lo ignore y Bash lo tome directamente del entorno inyectado.
-                        sh """
-                            docker rm -f vpn-deploy || true
+                        chmod +x deploy.sh
+                        
+                        echo "--- Ejecutando Docker ---"
+                        docker rm -f vpn-deploy || true
+                        
+                        # AQUÍ ESTÁ LA SOLUCIÓN:
+                        # Pasamos la variable cargada globalmente (env.SELECTED_PASS)
+                        # al contenedor como "MY_SSH_PASS".
+                        
+                        docker run -d --name vpn-deploy \\
+                            -e MY_SSH_PASS="${env.SELECTED_PASS}" \\
+                            --network container:vpn-sidecar \\
+                            ubuntu:22.04 sleep infinity
+
+                        docker exec vpn-deploy mkdir -p /workspace
+                        docker cp deploy.sh vpn-deploy:/workspace/
+                        docker cp ${env.LOCAL_BACKUP_FILE} vpn-deploy:/workspace/
+                        
+                        # Ejecutamos
+                        docker exec vpn-deploy /workspace/deploy.sh
                             
-                            docker run -d --name vpn-deploy \
-                                -e PASS_ARG="\$MY_SSH_PASS" \
-                                --network container:vpn-sidecar \
-                                ubuntu:22.04 sleep infinity
-                            
-                            docker exec vpn-deploy mkdir -p /workspace
-                            docker cp deploy.sh vpn-deploy:/workspace/
-                            docker cp ${env.LOCAL_BACKUP_FILE} vpn-deploy:/workspace/
-                            
-                            docker exec vpn-deploy /workspace/deploy.sh
-                            
-                            docker rm -f vpn-deploy
-                        """
-                    }
+                        docker rm -f vpn-deploy
+                    """
                 }
             }
         }
