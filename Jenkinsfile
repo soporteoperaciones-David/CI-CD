@@ -80,7 +80,6 @@ except:
 
                     def mainScript = """#!/bin/bash
 set -e
-# Instalamos iproute2 para que 'ip addr' funcione
 apt-get update -qq && apt-get install -y curl python3 iproute2 -qq
 
 echo '--- Verificando túnel ---'
@@ -104,8 +103,6 @@ EXT="${params.BACKUP_TYPE == 'zip' ? 'zip' : 'dump'}"
 FILENAME="backup_\${DB_NAME}-\${DATE}.\${EXT}"
 
 echo "--- Descargando archivo: \$FILENAME ---"
-# CORRECCIÓN CURL: Usamos --form-string para evitar interpretación de archivos
-# y nos aseguramos de que la URL esté bien formada.
 curl -k -X POST \
     --form-string "master_pwd=${env.MASTER_PWD}" \
     --form-string "name=\$DB_NAME" \
@@ -113,9 +110,8 @@ curl -k -X POST \
     "https://${params.ODOO_URL}/web/database/backup" \
     -o "/workspace/\$FILENAME"
 
-# Verificamos si descargó algo
 if [ ! -s "/workspace/\$FILENAME" ]; then
-    echo "❌ Error: El archivo descargado está vacío o no existe."
+    echo "❌ Error: El archivo descargado está vacío."
     exit 1
 fi
 
@@ -128,6 +124,10 @@ chmod 666 "/workspace/\$FILENAME"
 
                     echo "--- Ejecutando Worker ---"
                     sh """
+                        # CORRECCIÓN: Limpiamos contenedor viejo antes de crear uno nuevo
+                        docker rm -f vpn-worker || true
+                        
+                        # Arrancamos worker dormido unido a la red VPN
                         docker run -d --name vpn-worker --network container:vpn-sidecar ubuntu:22.04 sleep infinity
                         
                         docker exec vpn-worker mkdir -p /workspace
@@ -192,6 +192,9 @@ sshpass -p '${ROOT_PASS}' ssh -o StrictHostKeyChecking=no root@${target_ip} '
                         sh "chmod +x deploy.sh"
 
                         sh """
+                            # CORRECCIÓN: Limpieza preventiva
+                            docker rm -f vpn-deploy || true
+                            
                             docker run -d --name vpn-deploy --network container:vpn-sidecar ubuntu:22.04 sleep infinity
                             
                             docker exec vpn-deploy mkdir -p /workspace
