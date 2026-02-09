@@ -163,16 +163,16 @@ chmod 666 "/workspace/\$FILENAME"
                         if (env.DB_NAME.contains('edb') || env.DB_NAME.contains('cgs')) { env.PG_BIN_VERSION = "17" }
                     }
 
-                    // --- SELECCIÓN INTELIGENTE DE DESTINO Y CREDENCIAL ---
+                    // --- SELECCIÓN DE DESTINO ---
                     def target_ip = ""
                     def credential_id = ""
 
                     if (params.VERSION == 'v15') {
                         target_ip = env.IP_TEST_V15
-                        credential_id = 'ssh-pass-v15' // <--- ID que creaste en Jenkins
+                        credential_id = 'ssh-pass-v15' // Asegúrate de que este ID exista en Jenkins
                     } else {
                         target_ip = env.IP_TEST_V19
-                        credential_id = 'ssh-pass-v19' // <--- ID que creaste en Jenkins
+                        credential_id = 'ssh-pass-v19' // Asegúrate de que este ID exista en Jenkins
                     }
 
                     env.FINAL_URL = "https://${env.NEW_DB_NAME}.odooecuador.online/web/login"
@@ -180,21 +180,24 @@ chmod 666 "/workspace/\$FILENAME"
 
                     withCredentials([string(credentialsId: credential_id, variable: 'SSH_PASS')]) {
                         
-                        echo "--- Credencial cargada correctamente, generando script... ---"
+                        echo "--- Credencial cargada. Generando script genérico... ---"
 
-                        // CORRECCIÓN: Usamos env.SSH_PASS en lugar de SSH_PASS directo
+                        // CAMBIO CLAVE: 
+                        // Usamos \$SSH_PASS (con barra invertida) para que Groovy NO la toque.
+                        // Bash leerá la variable de entorno del contenedor.
                         def deployScript = """#!/bin/bash
 set -e
 apt-get update -qq && apt-get install -y sshpass openssh-client curl -qq
 
+echo "--- Usando IP: ${target_ip} ---"
+
 echo '--- 1. Subiendo archivo a /home/ubuntu (SCP) ---'
-# Usamos env.SSH_PASS para que Groovy lo encuentre
-sshpass -p '${env.SSH_PASS}' scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} ubuntu@${target_ip}:/home/ubuntu/
+sshpass -p "\$SSH_PASS" scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} ubuntu@${target_ip}:/home/ubuntu/
 
 echo '--- 2. Ejecutando comandos remotos (SSH + SUDO) ---'
-sshpass -p '${env.SSH_PASS}' ssh -o StrictHostKeyChecking=no ubuntu@${target_ip} '
+sshpass -p "\$SSH_PASS" ssh -o StrictHostKeyChecking=no ubuntu@${target_ip} '
     
-    echo "Moviemiento de archivo..."
+    echo "Moviendo archivo..."
     sudo mv /home/ubuntu/${env.LOCAL_BACKUP_FILE} ${env.BACKUP_DIR_REMOTE}/
     sudo chmod 644 ${env.BACKUP_DIR_REMOTE}/${env.LOCAL_BACKUP_FILE}
 
@@ -217,10 +220,18 @@ sshpass -p '${env.SSH_PASS}' ssh -o StrictHostKeyChecking=no ubuntu@${target_ip}
                         writeFile file: 'deploy.sh', text: deployScript
                         sh "chmod +x deploy.sh"
 
-                        echo "--- Ejecutando contenedor de despliegue ---"
+                        echo "--- Ejecutando contenedor con inyección de credencial ---"
+                        
+                        // CAMBIO CLAVE 2:
+                        // Pasamos la contraseña como variable de entorno al contenedor (-e)
+                        // Aquí sí usamos ${env.SSH_PASS} porque estamos en el comando 'sh'
                         sh """
                             docker rm -f vpn-deploy || true
-                            docker run -d --name vpn-deploy --network container:vpn-sidecar ubuntu:22.04 sleep infinity
+                            
+                            docker run -d --name vpn-deploy \
+                                -e SSH_PASS="${env.SSH_PASS}" \
+                                --network container:vpn-sidecar \
+                                ubuntu:22.04 sleep infinity
                             
                             docker exec vpn-deploy mkdir -p /workspace
                             docker cp deploy.sh vpn-deploy:/workspace/
