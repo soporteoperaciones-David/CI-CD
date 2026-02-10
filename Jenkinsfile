@@ -180,29 +180,23 @@ chmod 666 "/workspace/\$FILENAME"
                     def cleanName = env.DB_NAME.replace("-ee15", "").replace("-ee", "")
                     env.NEW_DB_NAME = "${cleanName}-" + sh(returnStdout: true, script: 'date +%Y%m%d').trim() + "-" + ((params.VERSION == 'v15') ? 'ee15n2' : 'ee19')
                     
-                    // --- SELECCIÓN DINÁMICA DE CREDENCIALES ---
+                    // --- SELECCIÓN DE CREDENCIALES ---
                     def target_master_cred_id = ''
-                    
                     if (params.VERSION == 'v15') {
                         env.TARGET_IP_FINAL = env.IP_TEST_V15
                         env.SELECTED_PASS = env.SSH_PASS_V15
-                        // ID de la credencial que acabas de crear en Jenkins para V15
                         target_master_cred_id = 'master-pwd-v15-test' 
                     } else {
                         env.TARGET_IP_FINAL = env.IP_TEST_V19
                         env.SELECTED_PASS = env.SSH_PASS_V19
-                        // ID para V19 (puede ser el mismo si usan la misma clave)
                         target_master_cred_id = 'master-pwd-v19-test' 
                     }
 
-                    // Leemos la credencial de forma segura
+                    // Obtenemos la contraseña de la credencial de Jenkins
                     env.TARGET_MASTER_PWD = credentials(target_master_cred_id)
-
-                    env.FINAL_URL = "https://${env.NEW_DB_NAME}.odooecuador.online/web/login"
                     
                     echo "--- DEBUG INFO ---"
-                    echo "Método: CURL (Universal)"
-                    echo "Usando Credencial ID: ${target_master_cred_id}"
+                    echo "Archivo a enviar: ${env.LOCAL_BACKUP_FILE}"
 
                     def deployScriptContent = """#!/bin/bash
 set -e
@@ -212,23 +206,36 @@ export SSHPASS="\$MY_SSH_PASS"
 echo "--- 1. Subiendo archivo ---"
 sshpass -e scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} ubuntu@${env.TARGET_IP_FINAL}:/home/ubuntu/
 
-echo "--- 2. Restaurando vía CURL (Universal) ---"
+echo "--- 2. Restaurando (Modo Debug) ---"
 sshpass -e ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_FINAL} 'sudo bash -s' <<'EOF'
 
-    # Variables
-    FILE_PATH="/home/ubuntu/${env.LOCAL_BACKUP_FILE}"
+    # Definir variables
+    FILE_NAME="${env.LOCAL_BACKUP_FILE}"
+    FILE_PATH="/home/ubuntu/\$FILE_NAME"
     DB_NAME="${env.NEW_DB_NAME}"
     
-    # Asegurar permisos
-    chmod 644 \$FILE_PATH
-    
-    # Limpieza preventiva
+    # 1. VERIFICACIÓN CRÍTICA DEL ARCHIVO
+    echo ">> Verificando existencia del archivo..."
+    if [ -f "\$FILE_PATH" ]; then
+        echo "✅ Archivo encontrado: \$FILE_PATH"
+        ls -lah \$FILE_PATH
+        chmod 644 \$FILE_PATH
+    else
+        echo "❌ ERROR FATAL: El archivo no está en /home/ubuntu/"
+        ls -lah /home/ubuntu/
+        exit 1
+    fi
+
+    # 2. LIMPIEZA DE LOGS VIEJOS (Para no confundirnos)
+    rm -f /tmp/restore_response.html
+
+    # 3. Preparar DB
     sudo -u postgres dropdb \$DB_NAME --if-exists || true
     
-    echo ">> Ejecutando CURL..."
+    echo ">> Enviando petición a Odoo..."
     
     # --- CURL ---
-    # Usamos backup_file (correcto) y la password inyectada por Jenkins
+    # Nota: Usamos la contraseña inyectada por Jenkins
     
     curl -v -X POST "http://localhost:8069/web/database/restore" \\
         -F "master_pwd=${env.TARGET_MASTER_PWD}" \\
@@ -237,21 +244,29 @@ sshpass -e ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_FINAL} 'sudo b
         -F "copy=true" \\
         -o /tmp/restore_response.html
     
-    # Verificación de respuesta
-    if grep -q "error" /tmp/restore_response.html; then
-        echo "⚠️ ALERTA: Respuesta del servidor:"
-        grep -o 'class="alert alert-danger">.*</div>' /tmp/restore_response.html || head -n 20 /tmp/restore_response.html
+    echo ">> Analizando respuesta..."
+    
+    # 4. ANÁLISIS DE ERROR
+    if grep -q "Database restore error" /tmp/restore_response.html; then
+        echo "❌ FALLÓ LA RESTAURACIÓN. Mensaje del servidor:"
+        grep -o 'class="alert alert-danger">.*</div>' /tmp/restore_response.html
         
         if grep -q "Access Denied" /tmp/restore_response.html; then
-            echo "❌ Error: La contraseña maestra configurada en Jenkins es incorrecta."
-            exit 1
+            echo ""
+            echo "🛑 CAUSA: LA CONTRASEÑA MAESTRA ES INCORRECTA."
+            echo "👉 Por favor revisa '/etc/odoo/odoo.conf' en el servidor destino."
+            echo "👉 Asegúrate de que la credencial ID '${target_master_cred_id}' en Jenkins tenga ese valor exacto."
         fi
+        exit 1
+    elif grep -q "error" /tmp/restore_response.html; then
+        echo "⚠️ Posible error genérico detectado:"
+        cat /tmp/restore_response.html
     else
-        echo "✅ Restauración completada."
+        echo "✅ Restauración Exitosa (HTTP 200 sin errores visibles)."
     fi
     
+    # Limpiar
     rm -f \$FILE_PATH
-    echo ">> Fin."
 EOF
 """
                     writeFile file: 'deploy.sh', text: deployScriptContent
