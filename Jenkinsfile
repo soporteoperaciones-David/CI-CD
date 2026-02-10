@@ -11,7 +11,6 @@ pipeline {
 
     environment {
         // --- CREDENCIALES ---
-        // Asegúrate de que los IDs coinciden con los de tu Jenkins
         SSH_PASS_V15 = credentials('root-pass-v15') 
         SSH_PASS_V19 = credentials('ssh-pass-v19')
         
@@ -62,8 +61,9 @@ pipeline {
                         selected_cred_id = 'dic-integralis360.com'
                     } else if (params.ODOO_URL.contains('lns') || params.ODOO_URL.contains('edb') || params.ODOO_URL.contains('cgs')) {
                         selected_cred_id = 'dic-lns'
+                    } else if (params.ODOO_URL.contains('.ee19')) {
+                        selected_cred_id = 'vault-ee19-integralis360.website'
                     } else {
-                        // Aquí cae alianza247. Si actualizaste 'vault-integralis360.website', esto funcionará.
                         selected_cred_id = 'vault-integralis360.website'
                     }
                     
@@ -71,71 +71,71 @@ pipeline {
 
                     // Script Python auxiliar
                     writeFile file: 'extract.py', text: """
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    if 'result' in data:
-        print(data['result'][0])
-    else:
-        print("ERROR_JSON")
-except:
-    print("ERROR_PYTHON")
-"""
+                        import sys, json
+                        try:
+                            data = json.load(sys.stdin)
+                            if 'result' in data:
+                                print(data['result'][0])
+                            else:
+                                print("ERROR_JSON")
+                        except:
+                            print("ERROR_PYTHON")
+                        """
 
                     // Script Bash (GENÉRICO)
                     // Nota: Ya no interpolamos ${env.MASTER_PWD} aquí. Usamos la variable de entorno $MASTER_PWD
                     // que inyectaremos vía Docker. Esto evita el problema del valor NULL.
                     def mainScript = """#!/bin/bash
-set -e
-apt-get update -qq && apt-get install -y curl python3 iproute2 -qq
+                        set -e
+                        apt-get update -qq && apt-get install -y curl python3 iproute2 -qq
 
-# Validación: Asegurarnos de que la contraseña llegó
-if [ -z "\$MASTER_PWD" ]; then
-    echo "❌ ERROR: La variable MASTER_PWD está vacía dentro del contenedor."
-    exit 1
-fi
+                        # Validación: Asegurarnos de que la contraseña llegó
+                        if [ -z "\$MASTER_PWD" ]; then
+                            echo "La variable MASTER_PWD está vacía dentro del contenedor."
+                            exit 1
+                        fi
 
-echo '--- Consultando Odoo ---'
-# Usamos la variable de entorno directa (\$MASTER_PWD)
-DB_JSON=\$(curl -s -k -X POST "https://${params.ODOO_URL}/web/database/list" \
-    -H "Content-Type: application/json" \
-    -d '{"params": {"master_pwd": "'"\$MASTER_PWD"'"}}')
+                        echo '--- Consultando Odoo ---'
+                        # Usamos la variable de entorno directa (\$MASTER_PWD)
+                        DB_JSON=\$(curl -s -k -X POST "https://${params.ODOO_URL}/web/database/list" \
+                            -H "Content-Type: application/json" \
+                            -d '{"params": {"master_pwd": "'"\$MASTER_PWD"'"}}')
 
-if echo "\$DB_JSON" | grep -q "Access Denied"; then
-    echo "❌ ERROR FATAL: Contraseña maestra rechazada al listar."
-    exit 1
-fi
+                        if echo "\$DB_JSON" | grep -q "Access Denied"; then
+                            echo "Contraseña maestra rechazada al listar."
+                            exit 1
+                        fi
 
-DB_NAME=\$(echo "\$DB_JSON" | python3 /workspace/extract.py)
-echo "Base detectada: \$DB_NAME"
+                        DB_NAME=\$(echo "\$DB_JSON" | python3 /workspace/extract.py)
+                        echo "Base detectada: \$DB_NAME"
 
-DATE=\$(date +%Y%m%d)
-EXT="${params.BACKUP_TYPE == 'zip' ? 'zip' : 'dump'}"
-FILENAME="backup_\${DB_NAME}-\${DATE}.\${EXT}"
+                        DATE=\$(date +%Y%m%d)
+                        EXT="${params.BACKUP_TYPE == 'zip' ? 'zip' : 'dump'}"
+                        FILENAME="backup_\${DB_NAME}-\${DATE}.\${EXT}"
 
-echo "--- Descargando archivo: \$FILENAME ---"
-curl -k -X POST \
-    --form-string "master_pwd=\$MASTER_PWD" \
-    --form-string "name=\$DB_NAME" \
-    --form-string "backup_format=${params.BACKUP_TYPE}" \
-    "https://${params.ODOO_URL}/web/database/backup" \
-    -o "/workspace/\$FILENAME"
+                        echo "--- Descargando archivo: \$FILENAME ---"
+                        curl -k -X POST \
+                            --form-string "master_pwd=\$MASTER_PWD" \
+                            --form-string "name=\$DB_NAME" \
+                            --form-string "backup_format=${params.BACKUP_TYPE}" \
+                            "https://${params.ODOO_URL}/web/database/backup" \
+                            -o "/workspace/\$FILENAME"
 
-# Validar si bajó un HTML de error
-if grep -q "Database backup error" "/workspace/\$FILENAME"; then
-    echo "❌ ERROR CRÍTICO: Odoo rechazó la descarga (Access Denied)."
-    exit 1
-fi
+                        # Validar si bajó un HTML de error
+                        if grep -q "Database backup error" "/workspace/\$FILENAME"; then
+                            echo "Odoo rechazó la descarga (Access Denied)."
+                            exit 1
+                        fi
 
-if [ ! -s "/workspace/\$FILENAME" ]; then
-    echo "❌ Error: Archivo vacío."
-    exit 1
-fi
+                        if [ ! -s "/workspace/\$FILENAME" ]; then
+                            echo "Archivo vacío."
+                            exit 1
+                        fi
 
-echo "\$FILENAME" > /workspace/filename.txt
-echo "\$DB_NAME" > /workspace/dbname.txt
-chmod 666 "/workspace/\$FILENAME"
-"""
+                        echo "\$FILENAME" > /workspace/filename.txt
+                        echo "\$DB_NAME" > /workspace/dbname.txt
+                        chmod 666 "/workspace/\$FILENAME"
+                        """
                     writeFile file: 'download.sh', text: mainScript
                     sh "chmod +x download.sh"
 
@@ -295,7 +295,7 @@ chmod 666 "/workspace/\$FILENAME"
         stage('Notificar') {
             steps {
                 script {
-                    def chat_msg = """{"text": "✅ *Respaldo Completado*\\n*Base:* ${env.NEW_DB_NAME}\\n*URL:* ${env.FINAL_URL}"}"""
+                    def chat_msg = """{"text": "Respaldo Completado\\nBase: ${env.NEW_DB_NAME}\\n*URL:* ${env.FINAL_URL}"}"""
                     sh "curl -X POST -H 'Content-Type: application/json; charset=UTF-8' -d '${chat_msg}' '${env.GOOGLE_CHAT_WEBHOOK}' || true"
 
                     def odoo_payload = """
