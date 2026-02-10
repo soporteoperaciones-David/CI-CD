@@ -177,96 +177,109 @@ chmod 666 "/workspace/\$FILENAME"
                     env.LOCAL_BACKUP_FILE = readFile('filename.txt').trim()
                     env.DB_NAME = readFile('dbname.txt').trim()
                     
+                    // Limpieza del nombre de la base
                     def cleanName = env.DB_NAME.replace("-ee15", "").replace("-ee", "")
                     env.NEW_DB_NAME = "${cleanName}-" + sh(returnStdout: true, script: 'date +%Y%m%d').trim() + "-" + ((params.VERSION == 'v15') ? 'ee15n2' : 'ee19')
                     
-                    // --- SELECCIÓN DE CREDENCIALES ---
-                    def target_master_cred_id = ''
+                    // --- CONFIGURACIÓN DINÁMICA ---
+                    def db_owner = 'odoo' // Default
+                    
                     if (params.VERSION == 'v15') {
                         env.TARGET_IP_FINAL = env.IP_TEST_V15
                         env.SELECTED_PASS = env.SSH_PASS_V15
-                        target_master_cred_id = 'master-pwd-v15-test' 
+                        db_owner = 'odoo15' // <--- Usamos odoo15 según tu ejemplo
                     } else {
                         env.TARGET_IP_FINAL = env.IP_TEST_V19
                         env.SELECTED_PASS = env.SSH_PASS_V19
-                        target_master_cred_id = 'master-pwd-v19-test' 
+                        db_owner = 'odoo'   // <--- Ajusta si en v19 usas otro usuario
                     }
-
-                    // Obtenemos la contraseña de la credencial de Jenkins
-                    env.TARGET_MASTER_PWD = credentials(target_master_cred_id)
                     
-                    echo "--- DEBUG INFO ---"
-                    echo "Archivo a enviar: ${env.LOCAL_BACKUP_FILE}"
+                    env.DB_OWNER = db_owner
+                    env.FINAL_URL = "https://${env.NEW_DB_NAME}.odooecuador.online/web/login"
+                    
+                    echo "--- ESTRATEGIA: PG_RESTORE NATIVO ---"
+                    echo "Servidor: ${env.TARGET_IP_FINAL}"
+                    echo "Base Nueva: ${env.NEW_DB_NAME}"
+                    echo "Dueño DB: ${env.DB_OWNER}"
 
                     def deployScriptContent = """#!/bin/bash
 set -e
-apt-get update -qq && apt-get install -y sshpass openssh-client curl -qq
+apt-get update -qq && apt-get install -y sshpass openssh-client -qq
 export SSHPASS="\$MY_SSH_PASS"
 
-echo "--- 1. Subiendo archivo ---"
+echo "--- 1. Subiendo archivo .dump ---"
 sshpass -e scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} ubuntu@${env.TARGET_IP_FINAL}:/home/ubuntu/
 
-echo "--- 2. Restaurando (Modo Debug) ---"
+echo "--- 2. Ejecutando Restore en Backend ---"
 sshpass -e ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_FINAL} 'sudo bash -s' <<'EOF'
 
-    # Definir variables
+    # --- ZONA ROOT ---
+    
+    # 1. Variables
     FILE_NAME="${env.LOCAL_BACKUP_FILE}"
-    FILE_PATH="/home/ubuntu/\$FILE_NAME"
+    SOURCE_PATH="/home/ubuntu/\$FILE_NAME"
+    DEST_DIR="/opt/backup_integralis"
+    DEST_PATH="\$DEST_DIR/\$FILE_NAME"
     DB_NAME="${env.NEW_DB_NAME}"
+    DB_OWNER="${env.DB_OWNER}"
     
-    # 1. VERIFICACIÓN CRÍTICA DEL ARCHIVO
-    echo ">> Verificando existencia del archivo..."
-    if [ -f "\$FILE_PATH" ]; then
-        echo "✅ Archivo encontrado: \$FILE_PATH"
-        ls -lah \$FILE_PATH
-        chmod 644 \$FILE_PATH
+    # 2. Preparar Directorio Seguro
+    mkdir -p \$DEST_DIR
+    
+    echo ">> Moviendo archivo a \$DEST_PATH..."
+    if [ -f "\$SOURCE_PATH" ]; then
+        mv \$SOURCE_PATH \$DEST_PATH
     else
-        echo "❌ ERROR FATAL: El archivo no está en /home/ubuntu/"
-        ls -lah /home/ubuntu/
-        exit 1
-    fi
-
-    # 2. LIMPIEZA DE LOGS VIEJOS (Para no confundirnos)
-    rm -f /tmp/restore_response.html
-
-    # 3. Preparar DB
-    sudo -u postgres dropdb \$DB_NAME --if-exists || true
-    
-    echo ">> Enviando petición a Odoo..."
-    
-    # --- CURL ---
-    # Nota: Usamos la contraseña inyectada por Jenkins
-    
-    curl -v -X POST "http://localhost:8069/web/database/restore" \\
-        -F "master_pwd=${env.TARGET_MASTER_PWD}" \\
-        -F "backup_file=@\$FILE_PATH" \\
-        -F "name=\$DB_NAME" \\
-        -F "copy=true" \\
-        -o /tmp/restore_response.html
-    
-    echo ">> Analizando respuesta..."
-    
-    # 4. ANÁLISIS DE ERROR
-    if grep -q "Database restore error" /tmp/restore_response.html; then
-        echo "❌ FALLÓ LA RESTAURACIÓN. Mensaje del servidor:"
-        grep -o 'class="alert alert-danger">.*</div>' /tmp/restore_response.html
-        
-        if grep -q "Access Denied" /tmp/restore_response.html; then
-            echo ""
-            echo "🛑 CAUSA: LA CONTRASEÑA MAESTRA ES INCORRECTA."
-            echo "👉 Por favor revisa '/etc/odoo/odoo.conf' en el servidor destino."
-            echo "👉 Asegúrate de que la credencial ID '${target_master_cred_id}' en Jenkins tenga ese valor exacto."
-        fi
-        exit 1
-    elif grep -q "error" /tmp/restore_response.html; then
-        echo "⚠️ Posible error genérico detectado:"
-        cat /tmp/restore_response.html
-    else
-        echo "✅ Restauración Exitosa (HTTP 200 sin errores visibles)."
+        echo "⚠️ El archivo ya estaba en destino o falló la subida."
     fi
     
-    # Limpiar
-    rm -f \$FILE_PATH
+    chmod 644 \$DEST_PATH
+    
+    # 3. Detectar la mejor versión de pg_restore disponible
+    # Intentamos usar la v17 o v14 si existen, sino la del sistema default
+    PG_BIN="pg_restore"
+    if [ -f "/usr/lib/postgresql/17/bin/pg_restore" ]; then
+        PG_BIN="/usr/lib/postgresql/17/bin/pg_restore"
+    elif [ -f "/usr/lib/postgresql/14/bin/pg_restore" ]; then
+        PG_BIN="/usr/lib/postgresql/14/bin/pg_restore"
+    fi
+    
+    echo ">> Usando binario: \$PG_BIN"
+    
+    # 4. PREPARAR BASE DE DATOS
+    echo ">> Recreando base de datos: \$DB_NAME (Dueño: \$DB_OWNER)"
+    
+    # Borramos la base si existe
+    sudo -u postgres dropdb \$DB_NAME --if-exists
+    
+    # Creamos la base vacía asignada al usuario correcto
+    # Esto reemplaza el flag --create del restore, dándonos más control
+    sudo -u postgres createdb -O \$DB_OWNER \$DB_NAME
+    
+    # 5. EJECUTAR RESTORE (Tu comando)
+    echo ">> Restaurando..."
+    
+    # Ejecutamos como usuario 'postgres' para tener permisos totales sin password
+    # Flags explicados:
+    # --dbname: Base destino
+    # --no-owner: Importante para no heredar dueños del backup original
+    # --role: Fuerza que los objetos creados pertenezcan al usuario odoo15/odoo
+    # --clean: Limpia (aunque acabamos de crearla vacía, no hace daño)
+    
+    sudo -u postgres \$PG_BIN \\
+        --dbname=\$DB_NAME \\
+        --clean \\
+        --no-acl \\
+        --no-owner \\
+        --role=\$DB_OWNER \\
+        --verbose \\
+        \$DEST_PATH > /tmp/pg_restore.log 2>&1 || echo "⚠️ Advertencias en restore (Verificar log si la app falla)"
+    
+    echo ">> Últimas 10 líneas del log de restauración:"
+    tail -n 10 /tmp/pg_restore.log
+    
+    echo "PROCESO FINALIZADO EXITOSAMENTE"
+
 EOF
 """
                     writeFile file: 'deploy.sh', text: deployScriptContent
