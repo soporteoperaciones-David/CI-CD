@@ -141,7 +141,6 @@ chmod 666 "/workspace/\$FILENAME"
 
                     echo "--- Ejecutando Worker con Credencial Inyectada ---"
                     
-                    // ⚠️ AQUÍ ESTÁ LA SOLUCIÓN DEL NULL ⚠️
                     // Usamos withCredentials con el ID seleccionado dinámicamente
                     withCredentials([string(credentialsId: selected_cred_id, variable: 'TEMP_PWD')]) {
                         sh """
@@ -181,17 +180,16 @@ chmod 666 "/workspace/\$FILENAME"
                     def cleanName = env.DB_NAME.replace("-ee15", "").replace("-ee", "")
                     env.NEW_DB_NAME = "${cleanName}-" + sh(returnStdout: true, script: 'date +%Y%m%d').trim() + "-" + ((params.VERSION == 'v15') ? 'ee15n2' : 'ee19')
                     
-                    // --- CONFIGURACIÓN DINÁMICA ---
-                    def db_owner = 'odoo' // Default
+                    def db_owner = ''
                     
                     if (params.VERSION == 'v15') {
                         env.TARGET_IP_FINAL = env.IP_TEST_V15
                         env.SELECTED_PASS = env.SSH_PASS_V15
-                        db_owner = 'odoo15' // <--- Usamos odoo15 según tu ejemplo
+                        db_owner = 'odoo15'  
                     } else {
                         env.TARGET_IP_FINAL = env.IP_TEST_V19
                         env.SELECTED_PASS = env.SSH_PASS_V19
-                        db_owner = 'odoo'   // <--- Ajusta si en v19 usas otro usuario
+                        db_owner = 'odoo19'  
                     }
                     
                     env.DB_OWNER = db_owner
@@ -203,85 +201,75 @@ chmod 666 "/workspace/\$FILENAME"
                     echo "Dueño DB: ${env.DB_OWNER}"
 
                     def deployScriptContent = """#!/bin/bash
-set -e
-apt-get update -qq && apt-get install -y sshpass openssh-client -qq
-export SSHPASS="\$MY_SSH_PASS"
+                        set -e
+                        apt-get update -qq && apt-get install -y sshpass openssh-client -qq
+                        export SSHPASS="\$MY_SSH_PASS"
 
-echo "--- 1. Subiendo archivo .dump ---"
-sshpass -e scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} ubuntu@${env.TARGET_IP_FINAL}:/home/ubuntu/
+                        echo " Subiendo archivo .dump "
+                        sshpass -e scp -o StrictHostKeyChecking=no /workspace/${env.LOCAL_BACKUP_FILE} ubuntu@${env.TARGET_IP_FINAL}:/home/ubuntu/
 
-echo "--- 2. Ejecutando Restore en Backend ---"
-sshpass -e ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_FINAL} 'sudo bash -s' <<'EOF'
+                        echo " Ejecutando Restore en Backend "
+                        sshpass -e ssh -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP_FINAL} 'sudo bash -s' <<'EOF'
 
-    # --- ZONA ROOT ---
-    
-    # 1. Variables
-    FILE_NAME="${env.LOCAL_BACKUP_FILE}"
-    SOURCE_PATH="/home/ubuntu/\$FILE_NAME"
-    DEST_DIR="/opt/backup_integralis"
-    DEST_PATH="\$DEST_DIR/\$FILE_NAME"
-    DB_NAME="${env.NEW_DB_NAME}"
-    DB_OWNER="${env.DB_OWNER}"
-    
-    # 2. Preparar Directorio Seguro
-    mkdir -p \$DEST_DIR
-    
-    echo ">> Moviendo archivo a \$DEST_PATH..."
-    if [ -f "\$SOURCE_PATH" ]; then
-        mv \$SOURCE_PATH \$DEST_PATH
-    else
-        echo "⚠️ El archivo ya estaba en destino o falló la subida."
-    fi
-    
-    chmod 644 \$DEST_PATH
-    
-    # 3. Detectar la mejor versión de pg_restore disponible
-    # Intentamos usar la v17 o v14 si existen, sino la del sistema default
-    PG_BIN="pg_restore"
-    if [ -f "/usr/lib/postgresql/17/bin/pg_restore" ]; then
-        PG_BIN="/usr/lib/postgresql/17/bin/pg_restore"
-    elif [ -f "/usr/lib/postgresql/14/bin/pg_restore" ]; then
-        PG_BIN="/usr/lib/postgresql/14/bin/pg_restore"
-    fi
-    
-    echo ">> Usando binario: \$PG_BIN"
-    
-    # 4. PREPARAR BASE DE DATOS
-    echo ">> Recreando base de datos: \$DB_NAME (Dueño: \$DB_OWNER)"
-    
-    # Borramos la base si existe
-    sudo -u postgres dropdb \$DB_NAME --if-exists
-    
-    # Creamos la base vacía asignada al usuario correcto
-    # Esto reemplaza el flag --create del restore, dándonos más control
-    sudo -u postgres createdb -O \$DB_OWNER \$DB_NAME
-    
-    # 5. EJECUTAR RESTORE (Tu comando)
-    echo ">> Restaurando..."
-    
-    # Ejecutamos como usuario 'postgres' para tener permisos totales sin password
-    # Flags explicados:
-    # --dbname: Base destino
-    # --no-owner: Importante para no heredar dueños del backup original
-    # --role: Fuerza que los objetos creados pertenezcan al usuario odoo15/odoo
-    # --clean: Limpia (aunque acabamos de crearla vacía, no hace daño)
-    
-    sudo -u postgres \$PG_BIN \\
-        --dbname=\$DB_NAME \\
-        --clean \\
-        --no-acl \\
-        --no-owner \\
-        --role=\$DB_OWNER \\
-        --verbose \\
-        \$DEST_PATH > /tmp/pg_restore.log 2>&1 || echo "⚠️ Advertencias en restore (Verificar log si la app falla)"
-    
-    echo ">> Últimas 10 líneas del log de restauración:"
-    tail -n 10 /tmp/pg_restore.log
-    
-    echo "PROCESO FINALIZADO EXITOSAMENTE"
+                            # Variables
+                            FILE_NAME="${env.LOCAL_BACKUP_FILE}"
+                            SOURCE_PATH="/home/ubuntu/\$FILE_NAME"
+                            DEST_DIR="/opt/backup_integralis"
+                            DEST_PATH="\$DEST_DIR/\$FILE_NAME"
+                            DB_NAME="${env.NEW_DB_NAME}"
+                            DB_OWNER="${env.DB_OWNER}"
+                            
+                            # Preparar Directorio Seguro
+                            mkdir -p \$DEST_DIR
+                            
+                            echo ">> Moviendo archivo a \$DEST_PATH..."
+                            if [ -f "\$SOURCE_PATH" ]; then
+                                mv \$SOURCE_PATH \$DEST_PATH
+                            else
+                                echo "El archivo ya estaba en destino o falló el movimiento inicial."
+                            fi
+                            
+                            chmod 644 \$DEST_PATH
+                            
+                            # Detectar binario de pg_restore
+                            PG_BIN="pg_restore"
+                            if [ -f "/usr/lib/postgresql/17/bin/pg_restore" ]; then
+                                PG_BIN="/usr/lib/postgresql/17/bin/pg_restore"
+                            elif [ -f "/usr/lib/postgresql/14/bin/pg_restore" ]; then
+                                PG_BIN="/usr/lib/postgresql/14/bin/pg_restore"
+                            fi
+                            
+                            echo ">> Usando binario: \$PG_BIN"
+                            
+                            # PREPARAR BASE DE DATOS
+                            echo ">> Recreando base de datos: \$DB_NAME (Dueño: \$DB_OWNER)"
+                            
+                            # Borramos la base si existe
+                            sudo -u postgres dropdb \$DB_NAME --if-exists
+                            
+                            # Creamos la base vacía asignada al usuario correcto (odoo15 u odoo19)
+                            sudo -u postgres createdb -O \$DB_OWNER \$DB_NAME
+                            
+                            # EJECUTAR RESTORE
+                            echo ">> Restaurando..."
+                            
+                            # Usamos flags para asegurar que el dueño sea el correcto
+                            sudo -u postgres \$PG_BIN \\
+                                --dbname=\$DB_NAME \\
+                                --clean \\
+                                --no-acl \\
+                                --no-owner \\
+                                --role=\$DB_OWNER \\
+                                --verbose \\
+                                \$DEST_PATH > /tmp/pg_restore.log 2>&1 || echo "Advertencias en restore (Verificar log si la app falla)"
+                            
+                            echo ">> Últimas 10 líneas del log de restauración:"
+                            tail -n 10 /tmp/pg_restore.log
+                            
+                            echo "PROCESO FINALIZADO EXITOSAMENTE"
 
-EOF
-"""
+                        EOF
+                        """
                     writeFile file: 'deploy.sh', text: deployScriptContent
                     sh "chmod +x deploy.sh"
 
