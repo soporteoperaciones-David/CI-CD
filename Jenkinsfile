@@ -41,11 +41,15 @@ pipeline {
                             echo "--- Iniciando Worker de Descarga ---"
                             docker rm -f rclone-worker || true
                             
-                            # Usamos --network host para evitar bloqueos de DNS/Firewall
+                            # Usamos --network host para evitar bloqueos
                             docker run -d --name rclone-worker --network host ubuntu:22.04 sleep infinity
                             
                             docker exec rclone-worker apt-get update -qq
-                            docker exec rclone-worker apt-get install -y curl unzip -qq
+                            
+                            # --- CORRECCIÓN AQUÍ: Instalamos tzdata ---
+                            # DEBIAN_FRONTEND=noninteractive es vital para que no pida configurar la zona manual
+                            docker exec -e DEBIAN_FRONTEND=noninteractive rclone-worker apt-get install -y curl unzip tzdata -qq
+                            
                             docker exec rclone-worker sh -c 'curl https://rclone.org/install.sh | bash'
                             
                             # Config Rclone
@@ -58,14 +62,16 @@ pipeline {
                             docker exec rclone-worker chmod +x /workspace/download_backup.sh
                             
                             # Ejecutar Descarga
+                            # Pasamos la variable TZ explícitamente al contenedor también por seguridad
                             docker exec \
+                                -e TZ="America/Guayaquil" \
                                 -e ODOO_URL="${params.ODOO_URL}" \
                                 -e VERSION="${params.VERSION}" \
                                 -e BACKUP_DATE="${params.BACKUP_DATE}" \
                                 rclone-worker /workspace/download_backup.sh
                         """
                         
-                        // Traer resultados (Corregido: usamos // porque estamos en Groovy)
+                        // Traer resultados
                         sh """
                             docker cp rclone-worker:/workspace/filename.txt .
                             docker cp rclone-worker:/workspace/dbname.txt .
