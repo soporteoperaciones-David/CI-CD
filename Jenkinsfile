@@ -83,63 +83,63 @@ pipeline {
         stage('3. Restaurar (Directo)') {
             steps {
                 script {
-                    // 1. Cargar datos
                     env.LOCAL_BACKUP_FILE = readFile('filename.txt').trim()
                     env.DB_NAME_ORIGINAL = readFile('dbname.txt').trim()
                     
                     def cleanName = env.DB_NAME_ORIGINAL.replace("-ee15", "").replace("-ee", "")
                     
-                    // Calcular fecha (Hora Ecuador)
+                    // Calculamos fecha (Hora Ecuador)
                     def dateSuffix = sh(returnStdout: true, script: 'TZ="America/Guayaquil" date +%Y%m%d').trim()
                     if (env.LOCAL_BACKUP_FILE =~ /\d{8}/) {
                         dateSuffix = (env.LOCAL_BACKUP_FILE =~ /\d{8}/)[0]
                     }
 
-                    def odooVerSuffix = (params.VERSION == 'v15') ? 'ee15n2' : 'ee19'
-                    def targetIP = (params.VERSION == 'v15') ? env.IP_TEST_V15 : env.IP_TEST_V19
-                    def dbOwner = (params.VERSION == 'v15') ? 'odoo15' : 'odoo19'
+                    // Definimos variables de entorno para usar dentro del sh
+                    env.TARGET_IP = (params.VERSION == 'v15') ? env.IP_TEST_V15 : env.IP_TEST_V19
+                    env.DB_OWNER = (params.VERSION == 'v15') ? 'odoo15' : 'odoo19'
+                    env.BASE_NAME = cleanName
+                    env.DATE_SUFFIX = dateSuffix
+                    env.ODOO_SUFFIX = (params.VERSION == 'v15') ? 'ee15n2' : 'ee19'
 
-                    echo "--- Iniciando Despliegue Directo (Host-to-Host) ---"
+                    echo "--- Iniciando Despliegue Directo a ${env.TARGET_IP} ---"
 
-                    // 2. Usamos withCredentials (Nativo de Jenkins, no requiere SSH Agent Plugin)
+                    // Usamos withCredentials
                     withCredentials([sshUserPrivateKey(credentialsId: 'jenkins-ssh-key', keyFileVariable: 'MY_KEY_FILE', usernameVariable: 'SSH_USER')]) {
                         
-                        // IMPORTANTE: Aseguramos permisos correctos en la llave temporal
-                        sh "chmod 600 ${env.MY_KEY_FILE}"
+                        // SOLUCIÓN SEGURIDAD: Usamos comillas simples para que Groovy no interpocle la llave
+                        // y usamos las variables de entorno ($MY_KEY_FILE) directamente en bash.
+                        
+                        sh '''
+                            # 1. Asegurar permisos de la llave temporal (evita "WARNING: UNPROTECTED PRIVATE KEY FILE!")
+                            chmod 600 "$MY_KEY_FILE"
 
-                        // PASO A: Smart Naming
-                        echo ">> Calculando nombre disponible..."
-                        // Exportamos la variable SSH_KEY_FILE para que el script la use
-                        sh """
-                            export SSH_KEY_FILE='${env.MY_KEY_FILE}'
-                            export TARGET_IP='${targetIP}'
-                            export BASE_NAME='${cleanName}'
-                            export DATE_SUFFIX='${dateSuffix}'
-                            export ODOO_SUFFIX='${odooVerSuffix}'
+                            # 2. Smart Naming
+                            echo ">> Calculando nombre disponible..."
+                            export SSH_KEY_FILE="$MY_KEY_FILE"
                             
                             chmod +x scripts/get_db_name.sh
                             ./scripts/get_db_name.sh > final_db_name.txt
-                        """
+                        '''
                         
                         env.NEW_DB_NAME = readFile('final_db_name.txt').trim()
                         env.FINAL_URL = "https://${env.NEW_DB_NAME}.odooecuador.online/web/login"
 
-                        // PASO B: Transferencia y Restauración
-                        echo ">> Enviando backup a ${targetIP}..."
+                        // 3. Transferencia y Restauración
+                        echo ">> Enviando backup..."
                         
-                        // Usamos la llave explícitamente con -i
-                        sh """
-                            # SCP con IPv4 (-4) y Llave (-i)
-                            scp -4 -i ${env.MY_KEY_FILE} -o StrictHostKeyChecking=no "${env.LOCAL_BACKUP_FILE}" ubuntu@${targetIP}:/tmp/
-                            scp -4 -i ${env.MY_KEY_FILE} -o StrictHostKeyChecking=no scripts/restore_db.sh ubuntu@${targetIP}:/tmp/
+                        sh '''
+                            # Transferencia con SCP (-i para la llave, -4 para IPv4)
+                            # Usamos timeout de 30s para no esperar eternamente si hay bloqueo
+                            scp -4 -i "$MY_KEY_FILE" -o StrictHostKeyChecking=no -o ConnectTimeout=30 "$LOCAL_BACKUP_FILE" ubuntu@$TARGET_IP:/tmp/
+                            scp -4 -i "$MY_KEY_FILE" -o StrictHostKeyChecking=no -o ConnectTimeout=30 scripts/restore_db.sh ubuntu@$TARGET_IP:/tmp/
                             
-                            echo ">> Ejecutando restauración remota..."
-                            ssh -4 -i ${env.MY_KEY_FILE} -o StrictHostKeyChecking=no ubuntu@${targetIP} \
-                                "export NEW_DB_NAME='${env.NEW_DB_NAME}' && \
-                                 export DB_OWNER='${dbOwner}' && \
-                                 export LOCAL_BACKUP_FILE='${env.LOCAL_BACKUP_FILE}' && \
+                            echo ">> Ejecutando restauración remota en $NEW_DB_NAME..."
+                            ssh -4 -i "$MY_KEY_FILE" -o StrictHostKeyChecking=no -o ConnectTimeout=30 ubuntu@$TARGET_IP \
+                                "export NEW_DB_NAME='$NEW_DB_NAME' && \
+                                 export DB_OWNER='$DB_OWNER' && \
+                                 export LOCAL_BACKUP_FILE='$LOCAL_BACKUP_FILE' && \
                                  chmod +x /tmp/restore_db.sh && /tmp/restore_db.sh"
-                        """
+                        '''
                     }
                 }
             }
