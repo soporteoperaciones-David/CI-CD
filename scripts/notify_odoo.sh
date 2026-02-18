@@ -19,7 +19,7 @@ ODOO_UID=2
 MODEL_NAME="backup.automation" # Tu modelo (según tu código antiguo)
 
 if [ -z "$RECORD_ID" ] || [ "$RECORD_ID" -eq 0 ]; then
-    echo "⚠️ No hay RECORD_ID (Valor: $RECORD_ID). Omitiendo actualización de Odoo."
+    echo "No hay RECORD_ID (Valor: $RECORD_ID). Omitiendo actualización de Odoo."
     exit 0
 fi
 

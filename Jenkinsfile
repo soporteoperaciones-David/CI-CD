@@ -231,7 +231,7 @@ except Exception as e:
         
         success {
             script {
-                echo "✅ Pipeline Exitoso. Ejecutando script externo..."
+                echo "Pipeline Exitoso. Ejecutando script externo..."
                 
                 // Datos para el script
                 def r_id = params.RECORD_ID ?: "0"
@@ -261,7 +261,7 @@ except Exception as e:
         
         failure {
             script {
-                echo "❌ Pipeline Fallido. Ejecutando script externo..."
+                echo "Pipeline Fallido. Ejecutando script externo..."
                 
                 def r_id = params.RECORD_ID ?: "0"
                 def msg  = "Fallo en Jenkins. Ver logs: ${env.BUILD_URL}"
