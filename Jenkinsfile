@@ -88,7 +88,7 @@ pipeline {
                     
                     def cleanName = env.DB_NAME_ORIGINAL.replace("-ee15", "").replace("-ee", "")
                     
-                    // Ajuste zona horaria manual para el sufijo
+                    // Ajuste zona horaria manual
                     def dateSuffix = sh(returnStdout: true, script: 'TZ="America/Guayaquil" date +%Y%m%d').trim()
                     if (env.LOCAL_BACKUP_FILE =~ /\d{8}/) {
                         dateSuffix = (env.LOCAL_BACKUP_FILE =~ /\d{8}/)[0]
@@ -114,12 +114,7 @@ pipeline {
                             docker run -d --name ssh-deployer --network host ubuntu:22.04 sleep infinity
                             
                             docker exec ssh-deployer apt-get update -qq 
-                            # Instalamos curl para debug de red
                             docker exec ssh-deployer apt-get install -y openssh-client curl -qq
-                            
-                            echo ">> DEBUG: Mi IP pública desde Docker es:"
-                            docker exec ssh-deployer curl -s ifconfig.me
-                            echo ""
 
                             # Copiamos scripts y backup
                             docker cp scripts/restore_db.sh ssh-deployer:/tmp/
@@ -130,7 +125,7 @@ pipeline {
                             docker cp \$MY_SSH_KEY_FILE ssh-deployer:/tmp/id_rsa
                             docker exec ssh-deployer chmod 600 /tmp/id_rsa
                             
-                            # PASO A: Smart Naming
+                            # PASO A: Smart Naming (Corregido para usar IPv4 y script actualizado)
                             echo ">> Calculando nombre único..."
                             docker exec \
                                 -e SSH_KEY_FILE="/tmp/id_rsa" \
@@ -146,14 +141,16 @@ pipeline {
                         env.NEW_DB_NAME = readFile('final_db_name.txt').trim()
                         env.FINAL_URL = "https://${env.NEW_DB_NAME}.odooecuador.online/web/login"
                         
-                        // PASO B: Restauración
+                        // PASO B: Restauración (Agregado -4 para forzar IPv4)
                         sh """
                             echo ">> Enviando archivos al servidor..."
-                            docker exec ssh-deployer scp -i /tmp/id_rsa -o StrictHostKeyChecking=no -o ConnectTimeout=20 /tmp/"${env.LOCAL_BACKUP_FILE}" ubuntu@${env.TARGET_IP}:/tmp/
-                            docker exec ssh-deployer scp -i /tmp/id_rsa -o StrictHostKeyChecking=no -o ConnectTimeout=20 /tmp/restore_db.sh ubuntu@${env.TARGET_IP}:/tmp/
+                            # SCP con -4 (IPv4 Only)
+                            docker exec ssh-deployer scp -4 -i /tmp/id_rsa -o StrictHostKeyChecking=no -o ConnectTimeout=20 /tmp/"${env.LOCAL_BACKUP_FILE}" ubuntu@${env.TARGET_IP}:/tmp/
+                            docker exec ssh-deployer scp -4 -i /tmp/id_rsa -o StrictHostKeyChecking=no -o ConnectTimeout=20 /tmp/restore_db.sh ubuntu@${env.TARGET_IP}:/tmp/
                         
                             echo ">> Restaurando base: ${env.NEW_DB_NAME}..."
-                            docker exec ssh-deployer ssh -i /tmp/id_rsa -o StrictHostKeyChecking=no -o ConnectTimeout=20 ubuntu@${env.TARGET_IP} \
+                            # SSH con -4 (IPv4 Only)
+                            docker exec ssh-deployer ssh -4 -i /tmp/id_rsa -o StrictHostKeyChecking=no -o ConnectTimeout=20 ubuntu@${env.TARGET_IP} \
                                 "export NEW_DB_NAME='${env.NEW_DB_NAME}' && \
                                  export DB_OWNER='${env.DB_OWNER}' && \
                                  export LOCAL_BACKUP_FILE='${env.LOCAL_BACKUP_FILE}' && \
