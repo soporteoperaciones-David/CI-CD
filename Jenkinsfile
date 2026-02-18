@@ -7,7 +7,7 @@ pipeline {
         string(name: 'BACKUP_DATE', defaultValue: 'latest', description: 'Fecha YYYYMMDD o latest')
         string(name: 'EXECUTED_BY', defaultValue: 'Sistema', description: 'Usuario Odoo')
         // OJO: Jenkins recibe esto como RECORD_ID o ODOO_ID. Asegúrate de usar el correcto.
-        string(name: 'RECORD_ID', defaultValue: '0', description: 'ID del registro en Odoo') 
+        string(name: 'ODOO_ID', defaultValue: '0', description: 'ID del registro enviado por Odoo') 
         string(name: 'BACKUP_TYPE', defaultValue: 'dump', description: 'Formato')
     }
 
@@ -126,8 +126,8 @@ pipeline {
             script {
                 echo "Pipeline Exitoso. Ejecutando notificación..."
                 
-                // Usamos params.RECORD_ID (definido en parameters arriba)
-                def r_id = params.RECORD_ID ?: "0"
+                // CAMBIO AQUÍ: Leemos ODOO_ID
+                def r_id = params.ODOO_ID ?: "0"
                 def url  = env.FINAL_URL
                 def msg  = "Restauración Exitosa.\\nBase: ${env.NEW_DB_NAME}"
                 
@@ -138,9 +138,8 @@ pipeline {
                         "ODOO_URL=https://faceable-maddison-unharangued.ngrok-free.dev",
                         "ODOO_DB=prueba"
                     ]) {
-                        // Verificamos si existe antes de ejecutar
-                        sh "ls -l scripts/notify_odoo.sh || echo 'El script no existe'"
                         sh "chmod +x scripts/notify_odoo.sh"
+                        // Pasamos r_id al script
                         sh "./scripts/notify_odoo.sh '${r_id}' 'done' '${url}' '${msg}'"
                     }
                 }
@@ -151,7 +150,8 @@ pipeline {
             script {
                 echo "Pipeline Fallido. Reportando error..."
                 
-                def r_id = params.RECORD_ID ?: "0"
+                // CAMBIO AQUÍ: Leemos ODOO_ID
+                def r_id = params.ODOO_ID ?: "0"
                 def msg  = "Fallo en Jenkins. Ver logs: ${env.BUILD_URL}"
 
                 withCredentials([usernamePassword(credentialsId: 'odoo-local-api-key', 

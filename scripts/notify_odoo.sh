@@ -6,14 +6,12 @@ STATE=$2
 BACKUP_URL=$3
 LOG_MSG=$4
 
-# Variables de entorno inyectadas por Jenkins
-# ODOO_URL, ODOO_DB, ODOO_PASS (API Key)
-
-ODOO_UID=2  # ID del admin. Ajustar si es necesario.
-MODEL_NAME="restauraciones.test" # <--- ¡VERIFICA QUE ESTE SEA EL NOMBRE DE TU MODELO EN ODOO!
+# ODOO_UID=2 es el admin por defecto.
+ODOO_UID=2  
+MODEL_NAME="backup.automation" # <--- CONFIRMADO EN TU PYTHON (_name = 'backup.automation')
 
 if [ -z "$RECORD_ID" ] || [ "$RECORD_ID" = "null" ] || [ "$RECORD_ID" -eq 0 ]; then
-    echo "⚠️ No hay RECORD_ID válido ($RECORD_ID). Omitiendo actualización Odoo."
+    echo "No hay RECORD_ID válido ($RECORD_ID). Omitiendo actualización Odoo."
     exit 0
 fi
 
@@ -21,6 +19,7 @@ echo "--- Notificando a Odoo ---"
 echo "URL: $ODOO_URL | DB: $ODOO_DB | ID: $RECORD_ID"
 
 # Construimos el JSON Payload
+# CORRECCIÓN: Cambiamos 'backup_url' por 'result_url' para que coincida con tu Python
 PAYLOAD=$(cat <<EOF
 {
     "jsonrpc": "2.0",
@@ -38,8 +37,8 @@ PAYLOAD=$(cat <<EOF
                 [${RECORD_ID}],
                 {
                     "state": "${STATE}",
-                    "backup_url": "${BACKUP_URL}",
-                    "log_notes": "${LOG_MSG}"
+                    "result_url": "${BACKUP_URL}",
+                    "jenkins_log": "${LOG_MSG}"
                 }
             ]
         ]
