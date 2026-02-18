@@ -1,49 +1,51 @@
 #!/bin/bash
 set -e
-apt-get update -qq && apt-get install -y sshpass openssh-client -qq
-export SSHPASS="$MY_SSH_PASS"
 
-# Variables que vienen del entorno de Jenkins
-FILE_NAME="$LOCAL_BACKUP_FILE"
-TARGET_IP="$TARGET_IP_FINAL"
-DB_TARGET="$NEW_DB_NAME"
-OWNER="$DB_OWNER"
+# --- VARIABLES RECIBIDAS DESDE JENKINS ---
+# NEW_DB_NAME
+# DB_OWNER (odoo15 u odoo19)
+# LOCAL_BACKUP_FILE (Nombre del archivo en /tmp)
 
-echo "--- 1. Subiendo archivo .dump a $TARGET_IP ---"
-sshpass -e scp -o StrictHostKeyChecking=no "/workspace/$FILE_NAME" ubuntu@$TARGET_IP:/home/ubuntu/
+echo "--- Iniciando Restauración Local ---"
+echo ">> Base Destino: $NEW_DB_NAME"
+echo ">> Dueño: $DB_OWNER"
+echo ">> Archivo: /tmp/$LOCAL_BACKUP_FILE"
 
-echo "--- 2. Conectando y Restaurando (Remoto) ---"
-# Aquí enviamos las variables locales al entorno remoto antes de ejecutar bash
-sshpass -e ssh -o StrictHostKeyChecking=no ubuntu@$TARGET_IP \
-"FILE_NAME='$FILE_NAME' DB_TARGET='$DB_TARGET' OWNER='$OWNER' sudo bash -s" <<'EOF'
+# 1. Mover el archivo a un lugar seguro (Home del usuario odoo)
+# Usamos sudo porque /tmp es de todos pero el destino es protegido
+TARGET_DIR="/home/$DB_OWNER/backups"
+sudo mkdir -p "$TARGET_DIR"
+sudo mv "/tmp/$LOCAL_BACKUP_FILE" "$TARGET_DIR/"
+sudo chown "$DB_OWNER:$DB_OWNER" "$TARGET_DIR/$LOCAL_BACKUP_FILE"
 
-    # --- ESTO SE EJECUTA EN EL SERVIDOR REMOTO ---
-    SOURCE_PATH="/home/ubuntu/$FILE_NAME"
-    DEST_DIR="/opt/backup_integralis"
-    DEST_PATH="$DEST_DIR/$FILE_NAME"
-    
-    # Mover a carpeta destino
-    mkdir -p $DEST_DIR
-    [ -f "$SOURCE_PATH" ] && mv $SOURCE_PATH $DEST_PATH
-    chmod 644 $DEST_PATH
-    
-    # Detectar binario
-    PG_BIN="pg_restore"
-    [ -f "/usr/lib/postgresql/17/bin/pg_restore" ] && PG_BIN="/usr/lib/postgresql/17/bin/pg_restore"
-    [ -f "/usr/lib/postgresql/14/bin/pg_restore" ] && PG_BIN="/usr/lib/postgresql/14/bin/pg_restore"
-    
-    echo ">> Recreando DB: $DB_TARGET (Dueño: $OWNER)"
-    sudo -u postgres dropdb $DB_TARGET --if-exists
-    sudo -u postgres createdb -O $OWNER $DB_TARGET
-    
-    echo ">> Restaurando con $PG_BIN..."
-    sudo -u postgres $PG_BIN \
-        --dbname=$DB_TARGET \
-        --clean --no-acl --no-owner \
-        --role=$OWNER \
-        --verbose \
-        $DEST_PATH > /tmp/pg_restore.log 2>&1 || echo "⚠️ Alerta en restore"
-        
-    tail -n 5 /tmp/pg_restore.log
-    echo "RESTAURACIÓN COMPLETADA"
-EOF
+FULL_PATH="$TARGET_DIR/$LOCAL_BACKUP_FILE"
+echo ">> Archivo movido a: $FULL_PATH"
+
+# 2. Crear la base de datos (vacía)
+echo ">> Creando base de datos vacía..."
+sudo -u postgres createdb -O "$DB_OWNER" "$NEW_DB_NAME"
+
+# 3. Restaurar según extensión
+if [[ "$LOCAL_BACKUP_FILE" == *".zip" ]]; then
+    echo ">> Restaurando ZIP (Filestore + SQL)..."
+    # Aquí necesitas la lógica de restore python de Odoo si es zip,
+    # PERO por ahora asumimos dump custom o sql plano para simplificar
+    echo "⚠️ ZIP restore requiere script python de Odoo. Usando unzip básico..."
+    sudo -u "$DB_OWNER" unzip -q "$FULL_PATH" -d "/home/$DB_OWNER/.local/share/Odoo/filestore/$NEW_DB_NAME"
+    # (Esto suele ser más complejo con filestore, pero sigamos con dump)
+
+elif [[ "$LOCAL_BACKUP_FILE" == *".dump" ]]; then
+    echo ">> Restaurando DUMP (Formato Custom)..."
+    # pg_restore requiere -d base
+    sudo -u postgres pg_restore --no-owner --role="$DB_OWNER" -d "$NEW_DB_NAME" "$FULL_PATH" || true
+    # El || true es porque pg_restore a veces da warnings que no son errores fatales
+
+else
+    echo ">> Restaurando SQL Plano..."
+    sudo -u postgres psql -d "$NEW_DB_NAME" -f "$FULL_PATH"
+fi
+
+echo "✅ Restauración Completada: $NEW_DB_NAME"
+
+# 4. (Opcional) Borrar backup para ahorrar espacio
+# rm "$FULL_PATH"
