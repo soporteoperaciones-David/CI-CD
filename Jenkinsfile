@@ -231,49 +231,56 @@ except Exception as e:
         
         success {
             script {
-                echo "Pipeline Exitoso. Actualizando Odoo..."
+                echo "✅ Pipeline Exitoso. Ejecutando script externo..."
                 
-                // Definir datos para el script
-                def recordId = params.RECORD_ID ?: "0" // Evita error si es null
-                def state = "done" // Estado de éxito en tu Odoo
-                def finalUrl = env.FINAL_URL
-                def logMsg = "Restauración completada exitosamente."
-
-                // Ejecutamos el script pasando credenciales como variables de entorno
-                withCredentials([usernamePassword(credentialsId: 'odoo-gestor-credentials', 
-                                                  usernameVariable: 'ODOO_GESTOR_USER', 
-                                                  passwordVariable: 'ODOO_GESTOR_PASSWORD')]) {
+                // Datos para el script
+                def r_id = params.RECORD_ID ?: "0"
+                def url  = env.FINAL_URL
+                def msg  = "Restauración Exitosa.\\nBase: ${env.NEW_DB_NAME}"
+                
+                // Usamos la credencial y llamamos al script .sh
+                withCredentials([usernamePassword(credentialsId: 'odoo-local-api-key', 
+                                                  usernameVariable: 'USER_IGNORE', 
+                                                  passwordVariable: 'ODOO_PASS')]) {
                     withEnv([
-                        "ODOO_GESTOR_URL=https://tu-odoo-gestor.com",
-                        "ODOO_GESTOR_DB=tu_base_gestor"
+                        "ODOO_URL=https://faceable-maddison-unharangued.ngrok-free.dev",  // <--- CAMBIA ESTO
+                        "ODOO_DB=prueba"              // <--- CAMBIA ESTO
                     ]) {
-                        sh "python3 scripts/update_odoo_status.py '${recordId}' '${state}' '${finalUrl}' '${logMsg}'"
+                        // Damos permisos de ejecución y corremos el script
+                        sh "chmod +x scripts/notify_odoo.sh"
+                        sh "./scripts/notify_odoo.sh '${r_id}' 'done' '${url}' '${msg}'"
                     }
                 }
-                
-                // Notificar Chat (Opcional, si ya actualizas Odoo quizás no necesites el chat)
-                // ... tu código de curl aquí ...
+
+                // Notificar Chat (Opcional)
+                withCredentials([string(credentialsId: 'webhook-sala-ci-cd-google-chat', variable: 'HOOK')]) {
+                     sh "curl -s -X POST -H 'Content-Type: application/json; charset=UTF-8' -d '{\"text\": \"*Éxito:* ${env.NEW_DB_NAME}\"}' \"\$HOOK\""
+                }
             }
         }
         
         failure {
             script {
-                echo "Pipeline Fallido. Reportando a Odoo..."
+                echo "❌ Pipeline Fallido. Ejecutando script externo..."
                 
-                def recordId = params.RECORD_ID ?: "0"
-                def state = "error" // Estado de fallo en tu Odoo
-                def finalUrl = "N/A"
-                def logMsg = "Fallo en Jenkins. Ver logs: ${env.BUILD_URL}"
+                def r_id = params.RECORD_ID ?: "0"
+                def msg  = "Fallo en Jenkins. Ver logs: ${env.BUILD_URL}"
 
-                withCredentials([usernamePassword(credentialsId: 'odoo-gestor-credentials', 
-                                                  usernameVariable: 'ODOO_GESTOR_USER', 
-                                                  passwordVariable: 'ODOO_GESTOR_PASSWORD')]) {
+                withCredentials([usernamePassword(credentialsId: 'odoo-local-api-key', 
+                                                  usernameVariable: 'USER_IGNORE', 
+                                                  passwordVariable: 'ODOO_PASS')]) {
                     withEnv([
-                        "ODOO_GESTOR_URL=https://tu-odoo-gestor.com",
-                        "ODOO_GESTOR_DB=tu_base_gestor"
+                        "ODOO_URL=https://faceable-maddison-unharangued.ngrok-free.dev", 
+                        "ODOO_DB=prueba"
                     ]) {
-                        sh "python3 scripts/update_odoo_status.py '${recordId}' '${state}' '${finalUrl}' '${logMsg}'"
+                        sh "chmod +x scripts/notify_odoo.sh"
+                        sh "./scripts/notify_odoo.sh '${r_id}' 'error' 'N/A' '${msg}'"
                     }
+                }
+                
+                // Notificar Chat
+                withCredentials([string(credentialsId: 'webhook-sala-ci-cd-google-chat', variable: 'HOOK')]) {
+                     sh "curl -s -X POST -H 'Content-Type: application/json; charset=UTF-8' -d '{\"text\": \"🚨 Fallo: ${env.BUILD_URL}\"}' \"\$HOOK\""
                 }
             }
         }
