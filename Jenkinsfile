@@ -224,45 +224,56 @@ except Exception as e:
         always {
             script {
                 echo "--- Limpieza General ---"
-                // 1. Borramos solo el contenedor de rclone (Stage 2)
-                // ssh-deployer ya no se usa, así que lo quitamos de aquí
                 sh "docker rm -f rclone-worker || true"
-                
-                // 2. Limpiamos el espacio de trabajo para no llenar el disco con backups viejos
                 cleanWs()
             }
         }
+        
         success {
             script {
-                // AQUI VA LA MAGIA: Actualizar el registro en Odoo Gestor
                 echo "Pipeline Exitoso. Actualizando Odoo..."
                 
-                // Llama al stage/función de notificación de ÉXITO
-                // Ojo: Si quieres hacer el callback a Odoo (XML-RPC), este es el mejor lugar
-                
-                def msg = "*Restauración Exitosa*\n*Base:* ${env.NEW_DB_NAME}\n*URL:* ${env.FINAL_URL}"
-                
-                withCredentials([string(credentialsId: 'webhook-sala-ci-cd-google-chat', variable: 'GOOGLE_CHAT_WEBHOOK')]) {
-                     sh """
-                        curl -s -X POST -H 'Content-Type: application/json; charset=UTF-8' \\
-                        -d '{"text": "${msg}"}' \\
-                        "\$GOOGLE_CHAT_WEBHOOK"
-                    """
+                // Definir datos para el script
+                def recordId = params.RECORD_ID ?: "0" // Evita error si es null
+                def state = "done" // Estado de éxito en tu Odoo
+                def finalUrl = env.FINAL_URL
+                def logMsg = "Restauración completada exitosamente."
+
+                // Ejecutamos el script pasando credenciales como variables de entorno
+                withCredentials([usernamePassword(credentialsId: 'odoo-gestor-credentials', 
+                                                  usernameVariable: 'ODOO_GESTOR_USER', 
+                                                  passwordVariable: 'ODOO_GESTOR_PASSWORD')]) {
+                    withEnv([
+                        "ODOO_GESTOR_URL=https://tu-odoo-gestor.com",
+                        "ODOO_GESTOR_DB=tu_base_gestor"
+                    ]) {
+                        sh "python3 scripts/update_odoo_status.py '${recordId}' '${state}' '${finalUrl}' '${logMsg}'"
+                    }
                 }
+                
+                // Notificar Chat (Opcional, si ya actualizas Odoo quizás no necesites el chat)
+                // ... tu código de curl aquí ...
             }
         }
+        
         failure {
             script {
-                echo "Pipeline Fallido."
+                echo "Pipeline Fallido. Reportando a Odoo..."
                 
-                def msg = "*Fallo en Restauración*\nRevisar Logs en Jenkins."
-                
-                withCredentials([string(credentialsId: 'webhook-sala-ci-cd-google-chat', variable: 'GOOGLE_CHAT_WEBHOOK')]) {
-                     sh """
-                        curl -s -X POST -H 'Content-Type: application/json; charset=UTF-8' \\
-                        -d '{"text": "${msg}"}' \\
-                        "\$GOOGLE_CHAT_WEBHOOK"
-                    """
+                def recordId = params.RECORD_ID ?: "0"
+                def state = "error" // Estado de fallo en tu Odoo
+                def finalUrl = "N/A"
+                def logMsg = "Fallo en Jenkins. Ver logs: ${env.BUILD_URL}"
+
+                withCredentials([usernamePassword(credentialsId: 'odoo-gestor-credentials', 
+                                                  usernameVariable: 'ODOO_GESTOR_USER', 
+                                                  passwordVariable: 'ODOO_GESTOR_PASSWORD')]) {
+                    withEnv([
+                        "ODOO_GESTOR_URL=https://tu-odoo-gestor.com",
+                        "ODOO_GESTOR_DB=tu_base_gestor"
+                    ]) {
+                        sh "python3 scripts/update_odoo_status.py '${recordId}' '${state}' '${finalUrl}' '${logMsg}'"
+                    }
                 }
             }
         }
