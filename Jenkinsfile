@@ -83,13 +83,14 @@ pipeline {
         stage('3. Restaurar (Directo)') {
             steps {
                 script {
-                    // Cargar variables de archivos previos
+                    // 1. Cargar datos de los stages anteriores
                     env.LOCAL_BACKUP_FILE = readFile('filename.txt').trim()
                     env.DB_NAME_ORIGINAL = readFile('dbname.txt').trim()
                     
                     def cleanName = env.DB_NAME_ORIGINAL.replace("-ee15", "").replace("-ee", "")
-                    def dateSuffix = sh(returnStdout: true, script: 'TZ="America/Guayaquil" date +%Y%m%d').trim()
                     
+                    // 2. Calcular fecha con zona horaria de Ecuador
+                    def dateSuffix = sh(returnStdout: true, script: 'TZ="America/Guayaquil" date +%Y%m%d').trim()
                     if (env.LOCAL_BACKUP_FILE =~ /\d{8}/) {
                         dateSuffix = (env.LOCAL_BACKUP_FILE =~ /\d{8}/)[0]
                     }
@@ -100,12 +101,12 @@ pipeline {
 
                     echo "--- Iniciando Despliegue Directo (Host-to-Host) ---"
 
-                    // Usamos el plugin de Jenkins para manejar la llave SSH de forma segura
-                    sshagent([env.SSH_KEY_ID]) {
+                    // 3. Usar el Agente SSH con tu credencial
+                    sshagent(['jenkins-ssh-key']) {
                         
-                        // PASO A: Smart Naming (Ejecutado directamente en el host)
-                        echo ">> Calculando nombre único..."
-                        def smartNamingCmd = """
+                        // PASO A: Smart Naming (Ejecutado directamente en el Host)
+                        echo ">> Calculando nombre disponible en el destino..."
+                        sh """
                             export TARGET_IP='${targetIP}'
                             export BASE_NAME='${cleanName}'
                             export DATE_SUFFIX='${dateSuffix}'
@@ -113,20 +114,18 @@ pipeline {
                             chmod +x scripts/get_db_name.sh
                             ./scripts/get_db_name.sh > final_db_name.txt
                         """
-                        sh smartNamingCmd
                         
                         env.NEW_DB_NAME = readFile('final_db_name.txt').trim()
                         env.FINAL_URL = "https://${env.NEW_DB_NAME}.odooecuador.online/web/login"
 
                         // PASO B: Transferencia y Restauración
-                        echo ">> Enviando archivo ${env.LOCAL_BACKUP_FILE} a ${targetIP}..."
-                        
+                        echo ">> Enviando backup a ${targetIP}..."
                         sh """
-                            # SCP Directo con IPv4 forzado
+                            # Forzamos IPv4 (-4) y evitamos confirmaciones interactivas
                             scp -4 -o StrictHostKeyChecking=no "${env.LOCAL_BACKUP_FILE}" ubuntu@${targetIP}:/tmp/
                             scp -4 -o StrictHostKeyChecking=no scripts/restore_db.sh ubuntu@${targetIP}:/tmp/
                             
-                            echo ">> Ejecutando restauración remota..."
+                            echo ">> Ejecutando restauración en el servidor remoto..."
                             ssh -4 -o StrictHostKeyChecking=no ubuntu@${targetIP} \
                                 "export NEW_DB_NAME='${env.NEW_DB_NAME}' && \
                                  export DB_OWNER='${dbOwner}' && \
