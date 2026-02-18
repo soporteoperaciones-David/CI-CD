@@ -12,7 +12,6 @@ pipeline {
 
     environment {
         // --- CREDENCIALES ---
-        // Usamos la llave SSH (ya no password)
         SSH_KEY_ID = 'jenkins-ssh-key' 
         GOOGLE_CHAT_WEBHOOK = credentials('GOOGLE_CHAT_WEBHOOK')
         ODOO_LOCAL_PASS = credentials('odoo-local-api-key') 
@@ -66,7 +65,7 @@ pipeline {
                                 rclone-worker /workspace/download_backup.sh
                         """
                         
-                        # Traer resultados
+                        // Traer resultados (Corregido: usamos // porque estamos en Groovy)
                         sh """
                             docker cp rclone-worker:/workspace/filename.txt .
                             docker cp rclone-worker:/workspace/dbname.txt .
@@ -104,12 +103,11 @@ pipeline {
 
                     echo "--- Iniciando Despliegue con Llave SSH ---"
                     
-                    // Inyectamos la llave privada en un archivo temporal
                     withCredentials([sshUserPrivateKey(credentialsId: env.SSH_KEY_ID, keyFileVariable: 'MY_SSH_KEY_FILE', usernameVariable: 'SSH_USER')]) {
                         sh """
                             docker rm -f ssh-deployer || true
                             
-                            # --network host: CRÍTICO para que funcione la conexión SSH sin timeout
+                            # --network host: CRÍTICO para SSH
                             docker run -d --name ssh-deployer --network host ubuntu:22.04 sleep infinity
                             
                             docker exec ssh-deployer apt-get update -qq 
@@ -120,12 +118,11 @@ pipeline {
                             docker cp scripts/get_db_name.sh ssh-deployer:/tmp/
                             docker cp "${env.LOCAL_BACKUP_FILE}" ssh-deployer:/tmp/
                             
-                            # --- INSTALACIÓN DE LA LLAVE EN EL CONTENEDOR ---
-                            # Copiamos la llave que Jenkins nos prestó
+                            # --- INSTALACIÓN DE LA LLAVE ---
                             docker cp \$MY_SSH_KEY_FILE ssh-deployer:/tmp/id_rsa
                             docker exec ssh-deployer chmod 600 /tmp/id_rsa
                             
-                            # PASO A: Smart Naming (Calculando v2, v3...)
+                            # PASO A: Smart Naming
                             echo ">> Calculando nombre único..."
                             docker exec \
                                 -e SSH_KEY_FILE="/tmp/id_rsa" \
@@ -144,12 +141,10 @@ pipeline {
                         // PASO B: Restauración
                         sh """
                             echo ">> Enviando archivos al servidor..."
-                            # SCP usando la llave (-i)
                             docker exec ssh-deployer scp -i /tmp/id_rsa -o StrictHostKeyChecking=no /tmp/"${env.LOCAL_BACKUP_FILE}" ubuntu@${env.TARGET_IP}:/tmp/
                             docker exec ssh-deployer scp -i /tmp/id_rsa -o StrictHostKeyChecking=no /tmp/restore_db.sh ubuntu@${env.TARGET_IP}:/tmp/
                         
                             echo ">> Restaurando base: ${env.NEW_DB_NAME}..."
-                            # SSH Remoto ejecutando el script de restauración
                             docker exec ssh-deployer ssh -i /tmp/id_rsa -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP} \
                                 "export NEW_DB_NAME='${env.NEW_DB_NAME}' && \
                                  export DB_OWNER='${env.DB_OWNER}' && \
