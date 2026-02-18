@@ -79,66 +79,75 @@ pipeline {
                 }
             }
         }
-
-        stage('3. Restaurar (Directo)') {
+stage('3. Restaurar (Estilo Mentor)') {
             steps {
                 script {
+                    // 1. Preparar Datos (Igual que antes)
                     env.LOCAL_BACKUP_FILE = readFile('filename.txt').trim()
                     env.DB_NAME_ORIGINAL = readFile('dbname.txt').trim()
                     
                     def cleanName = env.DB_NAME_ORIGINAL.replace("-ee15", "").replace("-ee", "")
-                    
-                    // Calculamos fecha (Hora Ecuador)
                     def dateSuffix = sh(returnStdout: true, script: 'TZ="America/Guayaquil" date +%Y%m%d').trim()
                     if (env.LOCAL_BACKUP_FILE =~ /\d{8}/) {
                         dateSuffix = (env.LOCAL_BACKUP_FILE =~ /\d{8}/)[0]
                     }
 
-                    // Definimos variables de entorno para usar dentro del sh
+                    // 2. Definir Variables de Entorno para el Shell
+                    // Esto permite que el bloque sh '...' las lea sin interpolación de Groovy
                     env.TARGET_IP = (params.VERSION == 'v15') ? env.IP_TEST_V15 : env.IP_TEST_V19
                     env.DB_OWNER = (params.VERSION == 'v15') ? 'odoo15' : 'odoo19'
                     env.BASE_NAME = cleanName
                     env.DATE_SUFFIX = dateSuffix
                     env.ODOO_SUFFIX = (params.VERSION == 'v15') ? 'ee15n2' : 'ee19'
 
-                    echo "--- Iniciando Despliegue Directo a ${env.TARGET_IP} ---"
+                    echo "--- Iniciando Despliegue a ${env.TARGET_IP} ---"
 
-                    // Usamos withCredentials
-                    withCredentials([sshUserPrivateKey(credentialsId: 'jenkins-ssh-key', keyFileVariable: 'MY_KEY_FILE', usernameVariable: 'SSH_USER')]) {
-                        
-                        // SOLUCIÓN SEGURIDAD: Usamos comillas simples para que Groovy no interpocle la llave
-                        // y usamos las variables de entorno ($MY_KEY_FILE) directamente en bash.
-                        
+                    // 3. El Bloque Mágico (Tal cual lo hace tu mentor)
+                    withCredentials([
+                        sshUserPrivateKey(credentialsId: 'jenkins-ssh-key', 
+                                          keyFileVariable: 'SSH_KEY', 
+                                          usernameVariable: 'SSH_USER')
+                    ]) {
+                        // OJO: Usamos comillas SIMPLES (''') igual que tu mentor.
+                        // Esto evita que Jenkins manosee la llave privada.
                         sh '''
-                            # 1. Asegurar permisos de la llave temporal (evita "WARNING: UNPROTECTED PRIVATE KEY FILE!")
-                            chmod 600 "$MY_KEY_FILE"
-
-                            # 2. Smart Naming
-                            echo ">> Calculando nombre disponible..."
-                            export SSH_KEY_FILE="$MY_KEY_FILE"
+                            set -e
                             
+                            # A. Asegurar permisos de la llave (Por si acaso)
+                            chmod 600 "$SSH_KEY"
+
+                            # B. Smart Naming (Ejecutado localmente primero)
+                            echo ">> Calculando nombre disponible..."
+                            export SSH_KEY_FILE="$SSH_KEY"
                             chmod +x scripts/get_db_name.sh
                             ./scripts/get_db_name.sh > final_db_name.txt
                         '''
                         
+                        // Leemos el nombre calculado
                         env.NEW_DB_NAME = readFile('final_db_name.txt').trim()
                         env.FINAL_URL = "https://${env.NEW_DB_NAME}.odooecuador.online/web/login"
-
-                        // 3. Transferencia y Restauración
-                        echo ">> Enviando backup..."
                         
+                        // Pasamos el nuevo nombre al entorno para el siguiente bloque
+                        env.NEW_DB_NAME_ENV = env.NEW_DB_NAME
+
                         sh '''
-                            # Transferencia con SCP (-i para la llave, -4 para IPv4)
-                            # Usamos timeout de 30s para no esperar eternamente si hay bloqueo
-                            scp -4 -i "$MY_KEY_FILE" -o StrictHostKeyChecking=no -o ConnectTimeout=30 "$LOCAL_BACKUP_FILE" ubuntu@$TARGET_IP:/tmp/
-                            scp -4 -i "$MY_KEY_FILE" -o StrictHostKeyChecking=no -o ConnectTimeout=30 scripts/restore_db.sh ubuntu@$TARGET_IP:/tmp/
+                            set -e
+                            echo ">> Enviando archivos a $TARGET_IP..."
+
+                            # C. Transferencia SCP (Usando variables de entorno directas)
+                            # Nota el uso de -o StrictHostKeyChecking=no igual que tu mentor
+                            scp -i "$SSH_KEY" -o StrictHostKeyChecking=no "$LOCAL_BACKUP_FILE" "ubuntu@$TARGET_IP:/tmp/"
+                            scp -i "$SSH_KEY" -o StrictHostKeyChecking=no scripts/restore_db.sh "ubuntu@$TARGET_IP:/tmp/"
                             
-                            echo ">> Ejecutando restauración remota en $NEW_DB_NAME..."
-                            ssh -4 -i "$MY_KEY_FILE" -o StrictHostKeyChecking=no -o ConnectTimeout=30 ubuntu@$TARGET_IP \
-                                "export NEW_DB_NAME='$NEW_DB_NAME' && \
+                            echo ">> Restaurando base: $NEW_DB_NAME_ENV ..."
+                            
+                            # D. Ejecución Remota SSH
+                            ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "ubuntu@$TARGET_IP" \
+                                "export NEW_DB_NAME='$NEW_DB_NAME_ENV' && \
                                  export DB_OWNER='$DB_OWNER' && \
                                  export LOCAL_BACKUP_FILE='$LOCAL_BACKUP_FILE' && \
-                                 chmod +x /tmp/restore_db.sh && /tmp/restore_db.sh"
+                                 chmod +x /tmp/restore_db.sh && \
+                                 /tmp/restore_db.sh"
                         '''
                     }
                 }
