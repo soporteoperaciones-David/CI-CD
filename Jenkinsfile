@@ -119,17 +119,9 @@ pipeline {
                 }
             }
         }
-    } // Fin stages
+    } 
     
-    post {
-        always {
-            script {
-                echo "--- Limpieza General ---"
-                sh "docker rm -f rclone-worker || true"
-                cleanWs()
-            }
-        }
-        
+    post {     
         success {
             script {
                 echo "Pipeline Exitoso. Ejecutando notificación..."
@@ -175,6 +167,13 @@ pipeline {
                 }
             }
         }
-    } // Fin post
+        cleanup {
+            script {
+                echo "--- 🧹 Limpieza Final (Ahora sí) ---"
+                sh "docker rm -f rclone-worker || true"
+                cleanWs() // ¡Aquí es seguro borrar!
+            }
+        }
+    } 
 
-} // Fin pipeline
+} 
