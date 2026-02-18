@@ -1,6 +1,11 @@
 #!/bin/bash
 set -e
 
+# --- 0. CONFIGURACIÓN DE ZONA HORARIA (CRÍTICO) ---
+# Forzamos a que el script piense que está en Ecuador.
+# Así, "yesterday" será calculado correctamente según tu horario local.
+export TZ="America/Guayaquil"
+
 # --- CONFIGURACIÓN DE IDs (TUS IDs) ---
 ID_INTEGRALIS_15="17hZ4JVz3pR7Ww258F3UgHD7O6cihTbJd"
 ID_SALESIANOS_15="1ZpP2o_b9BFX_3fhAZeILRvkJCbFINhlL"
@@ -9,9 +14,9 @@ ID_DICS_15="1-6ghqjTGsd3fvFAi3-TA1uNe-YGTNYwI"
 
 # --- 1. Determinar carpeta y NOMBRE BASE ---
 echo "--- Analizando Dominio: $ODOO_URL ---"
+echo ">> Hora del sistema para cálculo: $(date)"
 
 # Extraemos el subdominio para usarlo como filtro (ej: https://carros.sdb... -> carros)
-# Esto asume que el nombre del archivo backup contiene el nombre del subdominio
 DB_NAME_FILTER=$(echo "$ODOO_URL" | sed -e 's|^[^/]*//||' -e 's|/.*$||' | cut -d. -f1)
 echo ">> Filtro de nombre detectado: $DB_NAME_FILTER"
 
@@ -34,6 +39,7 @@ fi
 
 # --- 2. Calcular Fecha ---
 if [ "$BACKUP_DATE" == "latest" ] || [ -z "$BACKUP_DATE" ]; then
+    # Aquí es donde actúa la magia del TZ. Calculará el ayer de Ecuador.
     SEARCH_DATE=$(date -d "yesterday" +%Y%m%d)
     echo ">> Modo Automático: Buscando backup de AYER ($SEARCH_DATE)"
 else
@@ -47,17 +53,18 @@ REMOTE_NAME="gdrive-jenkins"
 
 echo ">> Buscando patrón: *$DB_NAME_FILTER*$SEARCH_DATE*"
 
-# AQUI ESTA EL CAMBIO: Agregamos $DB_NAME_FILTER al include
+# Buscamos filtrando por NOMBRE y FECHA
 FILE_PATH=$(rclone lsf "$REMOTE_NAME,root_folder_id=$TARGET_FOLDER_ID:respaldos" --recursive --files-only --include "*${DB_NAME_FILTER}*${SEARCH_DATE}*.dump" --include "*${DB_NAME_FILTER}*${SEARCH_DATE}*.tar.gz" | head -n 1)
 
 if [ -z "$FILE_PATH" ]; then
-    echo "❌ ERROR: No se encontró backup para '$DB_NAME_FILTER' con fecha $SEARCH_DATE."
+    echo " ERROR: No se encontró backup para '$DB_NAME_FILTER' con fecha $SEARCH_DATE."
     echo "   Verifica que el nombre del archivo en Drive contenga '$DB_NAME_FILTER'."
+    echo "   (Fecha calculada según hora: $(date))"
     exit 1
 fi
 
 FILENAME=$(basename "$FILE_PATH")
-echo "✅ Archivo encontrado: $FILENAME"
+echo " Archivo encontrado: $FILENAME"
 
 echo "--- Descargando... ---"
 rclone copy "$REMOTE_NAME,root_folder_id=$TARGET_FOLDER_ID:respaldos/$FILE_PATH" /workspace/ -P
@@ -77,6 +84,4 @@ CLEAN_DB_NAME=$(echo "$FILENAME" | sed -E 's/_?[0-9]{8}.*//')
 echo "$CLEAN_DB_NAME" > /workspace/dbname.txt
 
 chmod 666 "/workspace/$FILENAME"
-echo "✅ Descarga completada."
-
-
+echo " Descarga completada."
