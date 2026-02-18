@@ -83,13 +83,13 @@ pipeline {
         stage('3. Restaurar (Directo)') {
             steps {
                 script {
-                    // 1. Cargar datos de los stages anteriores
+                    // 1. Cargar datos
                     env.LOCAL_BACKUP_FILE = readFile('filename.txt').trim()
                     env.DB_NAME_ORIGINAL = readFile('dbname.txt').trim()
                     
                     def cleanName = env.DB_NAME_ORIGINAL.replace("-ee15", "").replace("-ee", "")
                     
-                    // 2. Calcular fecha con zona horaria de Ecuador
+                    // Calcular fecha (Hora Ecuador)
                     def dateSuffix = sh(returnStdout: true, script: 'TZ="America/Guayaquil" date +%Y%m%d').trim()
                     if (env.LOCAL_BACKUP_FILE =~ /\d{8}/) {
                         dateSuffix = (env.LOCAL_BACKUP_FILE =~ /\d{8}/)[0]
@@ -101,16 +101,22 @@ pipeline {
 
                     echo "--- Iniciando Despliegue Directo (Host-to-Host) ---"
 
-                    // 3. Usar el Agente SSH con tu credencial
-                    sshagent(['jenkins-ssh-key']) {
+                    // 2. Usamos withCredentials (Nativo de Jenkins, no requiere SSH Agent Plugin)
+                    withCredentials([sshUserPrivateKey(credentialsId: 'jenkins-ssh-key', keyFileVariable: 'MY_KEY_FILE', usernameVariable: 'SSH_USER')]) {
                         
-                        // PASO A: Smart Naming (Ejecutado directamente en el Host)
-                        echo ">> Calculando nombre disponible en el destino..."
+                        // IMPORTANTE: Aseguramos permisos correctos en la llave temporal
+                        sh "chmod 600 ${env.MY_KEY_FILE}"
+
+                        // PASO A: Smart Naming
+                        echo ">> Calculando nombre disponible..."
+                        // Exportamos la variable SSH_KEY_FILE para que el script la use
                         sh """
+                            export SSH_KEY_FILE='${env.MY_KEY_FILE}'
                             export TARGET_IP='${targetIP}'
                             export BASE_NAME='${cleanName}'
                             export DATE_SUFFIX='${dateSuffix}'
                             export ODOO_SUFFIX='${odooVerSuffix}'
+                            
                             chmod +x scripts/get_db_name.sh
                             ./scripts/get_db_name.sh > final_db_name.txt
                         """
@@ -120,13 +126,15 @@ pipeline {
 
                         // PASO B: Transferencia y Restauración
                         echo ">> Enviando backup a ${targetIP}..."
+                        
+                        // Usamos la llave explícitamente con -i
                         sh """
-                            # Forzamos IPv4 (-4) y evitamos confirmaciones interactivas
-                            scp -4 -o StrictHostKeyChecking=no "${env.LOCAL_BACKUP_FILE}" ubuntu@${targetIP}:/tmp/
-                            scp -4 -o StrictHostKeyChecking=no scripts/restore_db.sh ubuntu@${targetIP}:/tmp/
+                            # SCP con IPv4 (-4) y Llave (-i)
+                            scp -4 -i ${env.MY_KEY_FILE} -o StrictHostKeyChecking=no "${env.LOCAL_BACKUP_FILE}" ubuntu@${targetIP}:/tmp/
+                            scp -4 -i ${env.MY_KEY_FILE} -o StrictHostKeyChecking=no scripts/restore_db.sh ubuntu@${targetIP}:/tmp/
                             
-                            echo ">> Ejecutando restauración en el servidor remoto..."
-                            ssh -4 -o StrictHostKeyChecking=no ubuntu@${targetIP} \
+                            echo ">> Ejecutando restauración remota..."
+                            ssh -4 -i ${env.MY_KEY_FILE} -o StrictHostKeyChecking=no ubuntu@${targetIP} \
                                 "export NEW_DB_NAME='${env.NEW_DB_NAME}' && \
                                  export DB_OWNER='${dbOwner}' && \
                                  export LOCAL_BACKUP_FILE='${env.LOCAL_BACKUP_FILE}' && \
