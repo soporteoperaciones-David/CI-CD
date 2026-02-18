@@ -79,7 +79,7 @@ pipeline {
                 }
             }
         }
-        stage('3. Restaurar (Mentor + IPv4)') {
+        stage('3. Restaurar') {
             steps {
                 script {
                     // 1. Preparar Datos
@@ -168,19 +168,102 @@ pipeline {
                 }
             }
         }
+        stage('Actualizar Odoo (Callback)') {
+            steps {
+                script {
+                    echo "--- Actualizando Registro en Odoo Gestor ---"
+                    
+                    // Asegúrate de definir estas variables en las credenciales de Jenkins o variables globales
+                    def ODOO_URL = "https://tu-odoo-gestor.com" 
+                    def ODOO_DB = "nombre_base_gestor"
+                    def ODOO_USER = "admin_o_usuario_bot"
+                    def ODOO_PASS = "tu_api_key_o_password"
+                    def MODEL_NAME = "tu.modelo.restauracion" // E.j: restoration.test o el nombre técnico de ese modelo
+                    def RECORD_ID = params.RECORD_ID // ¡IMPORTANTE! Tienes que recibir esto desde Odoo
+                    
+                    def newState = "done" // O el estado técnico que signifique "Activo" (ej. 'active', 'restored')
+                    
+                    // Script Python incrustado para hacer la llamada XML-RPC
+                    def pythonScript = """
+import xmlrpc.client
+import sys
+
+url = '${ODOO_URL}'
+db = '${ODOO_DB}'
+username = '${ODOO_USER}'
+password = '${ODOO_PASS}'
+model_name = '${MODEL_NAME}'
+record_id = int('${RECORD_ID}')
+final_url = '${env.FINAL_URL}'
+
+try:
+    common = xmlrpc.client.ServerProxy('{}/xmlrpc/2/common'.format(url))
+    uid = common.authenticate(db, username, password, {})
+    
+    models = xmlrpc.client.ServerProxy('{}/xmlrpc/2/object'.format(url))
+    
+    # Escribimos en el registro: Cambiamos estado y guardamos la URL
+    models.execute_kw(db, uid, password, model_name, 'write', [[record_id], {
+        'state': '${newState}',
+        'backup_url': final_url,  # Asegúrate que este sea el nombre técnico del campo URL en Odoo
+        'log_notes': 'Restauración Exitosa desde Jenkins'
+    }])
+    print("Odoo Actualizado Correctamente")
+except Exception as e:
+    print(f"Error actualizando Odoo: {e}")
+    sys.exit(1)
+"""
+                    // Ejecutar el script (asumiendo que tienes python3 instalado en el agente)
+                    sh "python3 -c \"${pythonScript}\""
+                }
+            }
+        }
     }
     
     post {
         always {
             script {
-                sh "docker rm -f rclone-worker ssh-deployer || true"
+                echo "--- Limpieza General ---"
+                // 1. Borramos solo el contenedor de rclone (Stage 2)
+                // ssh-deployer ya no se usa, así que lo quitamos de aquí
+                sh "docker rm -f rclone-worker || true"
+                
+                // 2. Limpiamos el espacio de trabajo para no llenar el disco con backups viejos
                 cleanWs()
+            }
+        }
+        success {
+            script {
+                // AQUI VA LA MAGIA: Actualizar el registro en Odoo Gestor
+                echo "Pipeline Exitoso. Actualizando Odoo..."
+                
+                // Llama al stage/función de notificación de ÉXITO
+                // Ojo: Si quieres hacer el callback a Odoo (XML-RPC), este es el mejor lugar
+                
+                def msg = "*Restauración Exitosa*\n*Base:* ${env.NEW_DB_NAME}\n*URL:* ${env.FINAL_URL}"
+                
+                withCredentials([string(credentialsId: 'webhook-sala-ci-cd-google-chat', variable: 'GOOGLE_CHAT_WEBHOOK')]) {
+                     sh """
+                        curl -s -X POST -H 'Content-Type: application/json; charset=UTF-8' \\
+                        -d '{"text": "${msg}"}' \\
+                        "\$GOOGLE_CHAT_WEBHOOK"
+                    """
+                }
             }
         }
         failure {
             script {
-                 // Tu notificación de error existente
-                 sh "echo Falla" 
+                echo "Pipeline Fallido."
+                
+                def msg = "*Fallo en Restauración*\nRevisar Logs en Jenkins."
+                
+                withCredentials([string(credentialsId: 'webhook-sala-ci-cd-google-chat', variable: 'GOOGLE_CHAT_WEBHOOK')]) {
+                     sh """
+                        curl -s -X POST -H 'Content-Type: application/json; charset=UTF-8' \\
+                        -d '{"text": "${msg}"}' \\
+                        "\$GOOGLE_CHAT_WEBHOOK"
+                    """
+                }
             }
         }
     }
