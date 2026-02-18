@@ -79,10 +79,10 @@ pipeline {
                 }
             }
         }
-stage('3. Restaurar (Estilo Mentor)') {
+        stage('3. Restaurar (Mentor + IPv4)') {
             steps {
                 script {
-                    // 1. Preparar Datos (Igual que antes)
+                    // 1. Preparar Datos
                     env.LOCAL_BACKUP_FILE = readFile('filename.txt').trim()
                     env.DB_NAME_ORIGINAL = readFile('dbname.txt').trim()
                     
@@ -92,57 +92,60 @@ stage('3. Restaurar (Estilo Mentor)') {
                         dateSuffix = (env.LOCAL_BACKUP_FILE =~ /\d{8}/)[0]
                     }
 
-                    // 2. Definir Variables de Entorno para el Shell
-                    // Esto permite que el bloque sh '...' las lea sin interpolación de Groovy
+                    // 2. Variables de entorno
                     env.TARGET_IP = (params.VERSION == 'v15') ? env.IP_TEST_V15 : env.IP_TEST_V19
                     env.DB_OWNER = (params.VERSION == 'v15') ? 'odoo15' : 'odoo19'
                     env.BASE_NAME = cleanName
                     env.DATE_SUFFIX = dateSuffix
                     env.ODOO_SUFFIX = (params.VERSION == 'v15') ? 'ee15n2' : 'ee19'
 
-                    echo "--- Iniciando Despliegue a ${env.TARGET_IP} ---"
+                    echo "--- Despliegue a ${env.TARGET_IP} (Forzando IPv4) ---"
+                    
+                    // --- DIAGNÓSTICO RÁPIDO ---
+                    // Esto nos dirá con qué IP está saliendo realmente Jenkins
+                    sh "curl -4 -s --connect-timeout 5 ifconfig.me || echo 'No curl output'"
 
-                    // 3. El Bloque Mágico (Tal cual lo hace tu mentor)
+                    // 3. Bloque SSH (Estructura Mentor + Fix IPv4)
                     withCredentials([
                         sshUserPrivateKey(credentialsId: 'jenkins-ssh-key', 
                                           keyFileVariable: 'SSH_KEY', 
                                           usernameVariable: 'SSH_USER')
                     ]) {
-                        // OJO: Usamos comillas SIMPLES (''') igual que tu mentor.
-                        // Esto evita que Jenkins manosee la llave privada.
+                        // Usamos comillas simples para seguridad (igual que el mentor)
                         sh '''
                             set -e
-                            
-                            # A. Asegurar permisos de la llave (Por si acaso)
                             chmod 600 "$SSH_KEY"
 
-                            # B. Smart Naming (Ejecutado localmente primero)
+                            # --- PASO A: Smart Naming ---
                             echo ">> Calculando nombre disponible..."
                             export SSH_KEY_FILE="$SSH_KEY"
+                            
+                            # Nos aseguramos que el script sea ejecutable
                             chmod +x scripts/get_db_name.sh
+                            
+                            # Ejecutamos el script. (IMPORTANTE: El script sh también debe usar -4 o la variable SSH_KEY_FILE)
                             ./scripts/get_db_name.sh > final_db_name.txt
                         '''
                         
-                        // Leemos el nombre calculado
                         env.NEW_DB_NAME = readFile('final_db_name.txt').trim()
                         env.FINAL_URL = "https://${env.NEW_DB_NAME}.odooecuador.online/web/login"
                         
-                        // Pasamos el nuevo nombre al entorno para el siguiente bloque
+                        // Variable para el siguiente bloque
                         env.NEW_DB_NAME_ENV = env.NEW_DB_NAME
 
                         sh '''
                             set -e
                             echo ">> Enviando archivos a $TARGET_IP..."
 
-                            # C. Transferencia SCP (Usando variables de entorno directas)
-                            # Nota el uso de -o StrictHostKeyChecking=no igual que tu mentor
-                            scp -i "$SSH_KEY" -o StrictHostKeyChecking=no "$LOCAL_BACKUP_FILE" "ubuntu@$TARGET_IP:/tmp/"
-                            scp -i "$SSH_KEY" -o StrictHostKeyChecking=no scripts/restore_db.sh "ubuntu@$TARGET_IP:/tmp/"
+                            # --- PASO B: Transferencia SCP (CON -4 OBLIGATORIO) ---
+                            # Agregamos -4 para evitar que se pierda por IPv6
+                            scp -4 -i "$SSH_KEY" -o StrictHostKeyChecking=no "$LOCAL_BACKUP_FILE" "ubuntu@$TARGET_IP:/tmp/"
+                            scp -4 -i "$SSH_KEY" -o StrictHostKeyChecking=no scripts/restore_db.sh "ubuntu@$TARGET_IP:/tmp/"
                             
                             echo ">> Restaurando base: $NEW_DB_NAME_ENV ..."
                             
-                            # D. Ejecución Remota SSH
-                            ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "ubuntu@$TARGET_IP" \
+                            # --- PASO C: Ejecución Remota SSH (CON -4 OBLIGATORIO) ---
+                            ssh -4 -i "$SSH_KEY" -o StrictHostKeyChecking=no "ubuntu@$TARGET_IP" \
                                 "export NEW_DB_NAME='$NEW_DB_NAME_ENV' && \
                                  export DB_OWNER='$DB_OWNER' && \
                                  export LOCAL_BACKUP_FILE='$LOCAL_BACKUP_FILE' && \
