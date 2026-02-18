@@ -92,6 +92,8 @@ pipeline {
                     
                     // --- Preparación Variables ---
                     def cleanName = env.DB_NAME_ORIGINAL.replace("-ee15", "").replace("-ee", "")
+                    
+                    // Ajuste zona horaria manual por si acaso (para el nombre del archivo)
                     def dateSuffix = sh(returnStdout: true, script: 'date +%Y%m%d').trim()
                     if (env.LOCAL_BACKUP_FILE =~ /\d{8}/) {
                         dateSuffix = (env.LOCAL_BACKUP_FILE =~ /\d{8}/)[0]
@@ -109,11 +111,13 @@ pipeline {
 
                     echo "--- Iniciando Despliegue con Llave SSH ---"
                     
+                    // Inyectamos la llave privada
                     withCredentials([sshUserPrivateKey(credentialsId: env.SSH_KEY_ID, keyFileVariable: 'MY_SSH_KEY_FILE', usernameVariable: 'SSH_USER')]) {
                         sh """
                             docker rm -f ssh-deployer || true
                             
-                            # --network host: CRÍTICO para SSH
+                            # OJO AQUÍ: --network host es VITAL.
+                            # Esto hace que el contenedor sea "invisible" a nivel de red y use la IP del servidor Jenkins directo.
                             docker run -d --name ssh-deployer --network host ubuntu:22.04 sleep infinity
                             
                             docker exec ssh-deployer apt-get update -qq 
@@ -129,6 +133,7 @@ pipeline {
                             docker exec ssh-deployer chmod 600 /tmp/id_rsa
                             
                             # PASO A: Smart Naming
+                            # Nota: Añadí -o ConnectTimeout=10 para no esperar eternamente si falla
                             echo ">> Calculando nombre único..."
                             docker exec \
                                 -e SSH_KEY_FILE="/tmp/id_rsa" \
@@ -147,11 +152,12 @@ pipeline {
                         // PASO B: Restauración
                         sh """
                             echo ">> Enviando archivos al servidor..."
-                            docker exec ssh-deployer scp -i /tmp/id_rsa -o StrictHostKeyChecking=no /tmp/"${env.LOCAL_BACKUP_FILE}" ubuntu@${env.TARGET_IP}:/tmp/
-                            docker exec ssh-deployer scp -i /tmp/id_rsa -o StrictHostKeyChecking=no /tmp/restore_db.sh ubuntu@${env.TARGET_IP}:/tmp/
+                            # SCP usando la llave (-i) y StrictHostKeyChecking=no para evitar preguntas de "yes/no"
+                            docker exec ssh-deployer scp -i /tmp/id_rsa -o StrictHostKeyChecking=no -o ConnectTimeout=10 /tmp/"${env.LOCAL_BACKUP_FILE}" ubuntu@${env.TARGET_IP}:/tmp/
+                            docker exec ssh-deployer scp -i /tmp/id_rsa -o StrictHostKeyChecking=no -o ConnectTimeout=10 /tmp/restore_db.sh ubuntu@${env.TARGET_IP}:/tmp/
                         
                             echo ">> Restaurando base: ${env.NEW_DB_NAME}..."
-                            docker exec ssh-deployer ssh -i /tmp/id_rsa -o StrictHostKeyChecking=no ubuntu@${env.TARGET_IP} \
+                            docker exec ssh-deployer ssh -i /tmp/id_rsa -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@${env.TARGET_IP} \
                                 "export NEW_DB_NAME='${env.NEW_DB_NAME}' && \
                                  export DB_OWNER='${env.DB_OWNER}' && \
                                  export LOCAL_BACKUP_FILE='${env.LOCAL_BACKUP_FILE}' && \
