@@ -220,6 +220,9 @@ except Exception as e:
         }
     }
     
+    // ... tus stages anteriores (Checkout, Descargar, Restaurar) ...
+    // ... BORRA EL STAGE 'Actualizar Odoo (Callback)' QUE ESTABA AQUI ...
+
     post {
         always {
             script {
@@ -231,37 +234,30 @@ except Exception as e:
         
         success {
             script {
-                echo "Pipeline Exitoso. Ejecutando script externo..."
+                echo "Pipeline Exitoso. Ejecutando notificación..."
                 
-                // Datos para el script
                 def r_id = params.RECORD_ID ?: "0"
                 def url  = env.FINAL_URL
                 def msg  = "Restauración Exitosa.\\nBase: ${env.NEW_DB_NAME}"
                 
-                // Usamos la credencial y llamamos al script .sh
+                // Usamos la credencial corregida (Username with Password)
                 withCredentials([usernamePassword(credentialsId: 'odoo-local-api-key', 
                                                   usernameVariable: 'USER_IGNORE', 
                                                   passwordVariable: 'ODOO_PASS')]) {
                     withEnv([
-                        "ODOO_URL=https://faceable-maddison-unharangued.ngrok-free.dev",  // <--- CAMBIA ESTO
-                        "ODOO_DB=prueba"              // <--- CAMBIA ESTO
+                        "ODOO_URL=https://faceable-maddison-unharangued.ngrok-free.dev",  // <--- PON TU URL REAL
+                        "ODOO_DB=prueba"              // <--- PON TU BASE REAL
                     ]) {
-                        // Damos permisos de ejecución y corremos el script
                         sh "chmod +x scripts/notify_odoo.sh"
                         sh "./scripts/notify_odoo.sh '${r_id}' 'done' '${url}' '${msg}'"
                     }
-                }
-
-                // Notificar Chat (Opcional)
-                withCredentials([string(credentialsId: 'webhook-sala-ci-cd-google-chat', variable: 'HOOK')]) {
-                     sh "curl -s -X POST -H 'Content-Type: application/json; charset=UTF-8' -d '{\"text\": \"*Éxito:* ${env.NEW_DB_NAME}\"}' \"\$HOOK\""
                 }
             }
         }
         
         failure {
             script {
-                echo "Pipeline Fallido. Ejecutando script externo..."
+                echo "Pipeline Fallido. Reportando error..."
                 
                 def r_id = params.RECORD_ID ?: "0"
                 def msg  = "Fallo en Jenkins. Ver logs: ${env.BUILD_URL}"
@@ -276,11 +272,6 @@ except Exception as e:
                         sh "chmod +x scripts/notify_odoo.sh"
                         sh "./scripts/notify_odoo.sh '${r_id}' 'error' 'N/A' '${msg}'"
                     }
-                }
-                
-                // Notificar Chat
-                withCredentials([string(credentialsId: 'webhook-sala-ci-cd-google-chat', variable: 'HOOK')]) {
-                     sh "curl -s -X POST -H 'Content-Type: application/json; charset=UTF-8' -d '{\"text\": \"🚨 Fallo: ${env.BUILD_URL}\"}' \"\$HOOK\""
                 }
             }
         }
