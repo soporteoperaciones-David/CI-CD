@@ -12,7 +12,7 @@ TARGET_DIR="/tmp/odoo_restores"
 echo "--- Iniciando Restauración Inteligente ---"
 
 # Detectar versión de Postgres según el nombre de la base (Salesianos vs Estándar)
-if [[ "$NEW_DB_NAME" == *"salesianos"* ]]; then
+if [[ "$ODOO_URL" == *".sdb-integralis360.com"* || "$NEW_DB_NAME" == *"salesianos"* ]]; then
     echo ">> Detectado proyecto SALESIANOS. Usando PostgreSQL 12..."
     PG_BIN="/usr/lib/postgresql/12/bin"
 else
@@ -54,14 +54,14 @@ sudo chown postgres:postgres "$FULL_PATH"
 echo ">> Recreando base de datos $NEW_DB_NAME..."
 
 # Borrar y Crear DB
-sudo -u postgres $CMD_DROPDB --if-exists "$NEW_DB_NAME"
-sudo -u postgres $CMD_CREATEDB -O "$DB_OWNER" "$NEW_DB_NAME"
+sudo -u postgres $CMD_DROPDB --if-exists -- "$NEW_DB_NAME"
+sudo -u postgres $CMD_CREATEDB -O "$DB_OWNER" -- "$NEW_DB_NAME"
 
 # Restaurar
 if [[ "$LOCAL_BACKUP_FILE" == *".dump" ]]; then
     echo ">> Restaurando DUMP con $CMD_RESTORE ..."
     # Agregamos verbose leve y manejo de error
-    sudo -u postgres $CMD_RESTORE --verbose --no-owner --role="$DB_OWNER" -d "$NEW_DB_NAME" "$FULL_PATH" || echo "⚠️ Advertencia: pg_restore finalizó con advertencias (ignorando errores no críticos)."
+    sudo -u postgres $CMD_RESTORE --verbose --no-owner --role="$DB_OWNER" -d "$NEW_DB_NAME" -- "$FULL_PATH" || echo "⚠️ Advertencia: pg_restore finalizó con advertencias (ignorando errores no críticos)."
     
 elif [[ "$LOCAL_BACKUP_FILE" == *".sql" ]]; then
     echo ">> Restaurando SQL con $CMD_PSQL ..."
