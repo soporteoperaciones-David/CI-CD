@@ -96,7 +96,8 @@ fi
 echo "$FILENAME" > /workspace/filename.txt
 
 # Limpiamos el nombre para sacar la base (quitamos fechas y extensiones)
-CLEAN_DB_NAME=$(echo "$FILENAME" | sed -E 's/_?[0-9]{8}.*//')
+# Exigimos que haya un '_' o '-' justo antes de los 8 digitos de la fecha
+CLEAN_DB_NAME=$(echo "$FILENAME" | sed -E 's/_[0-9]{8}.*//' | sed -E 's/-[0-9]{8}.*//')
 echo "$CLEAN_DB_NAME" > /workspace/dbname.txt
 
 chmod 666 "/workspace/$FILENAME"
