@@ -77,8 +77,9 @@ pipeline {
                                     .replace(".com", "")
                                     .replace(".", "")
                     def dateSuffix = sh(returnStdout: true, script: 'TZ="America/Guayaquil" date +%Y%m%d').trim()
-                    if (env.LOCAL_BACKUP_FILE =~ /\d{8}/) {
-                        dateSuffix = (env.LOCAL_BACKUP_FILE =~ /\d{8}/)[0]
+                    def dateMatcher = env.LOCAL_BACKUP_FILE =~ /[_-](\d{8})/
+                    if (dateMatcher) {
+                        dateSuffix = dateMatcher[0][1] 
                     }
 
                     env.TARGET_IP = (params.VERSION == 'v15') ? env.IP_TEST_V15 : env.IP_TEST_V19
