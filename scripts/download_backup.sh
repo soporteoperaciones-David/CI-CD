@@ -18,24 +18,43 @@ echo ">> Hora del sistema para cálculo: $(date)"
 
 # Extraemos el subdominio para usarlo como filtro (ej: https://carros.sdb... -> carros)
 DB_NAME_FILTER=$(echo "$ODOO_URL" | sed -e 's|^[^/]*//||' -e 's|/.*$||' | cut -d. -f1)
-echo ">> Filtro de nombre detectado: $DB_NAME_FILTER"
 
-if [[ "$ODOO_URL" == *".sdb-integralis360.com"* ]]; then
+# RUTA BASE por defecto en Drive
+RCLONE_PATH="respaldos"
+
+# ==========================================
+# REGLAS DE ENRUTAMIENTO Y FILTROS
+# ==========================================
+
+# 1. CASO ESPECIAL: LNS
+if [[ "$ODOO_URL" == *"lns.com.ec"* ]]; then
+    TARGET_FOLDER_ID="$ID_SALESIANOS_15"
+    RCLONE_PATH="respaldos/lns2" # <--- SUBCARPETA ESPECÍFICA PARA LNS
+    
+    echo ">> Detectado: LNS Especial (Drive: Salesianos, Carpeta: $RCLONE_PATH)"
+
+# 2. CASO: SALESIANOS ESTÁNDAR
+elif [[ "$ODOO_URL" == *".sdb-integralis360.com"* ]]; then
     TARGET_FOLDER_ID="$ID_SALESIANOS_15"
     echo ">> Detectado: Salesianos (ID: $TARGET_FOLDER_ID)"
     
+# 3. CASO: DICS
 elif [[ "$ODOO_URL" == *".dic-integralis360.com"* ]]; then
     TARGET_FOLDER_ID="$ID_DICS_15"
     echo ">> Detectado: DICs (ID: $TARGET_FOLDER_ID)"
 
+# 4. CASO: v19
 elif [[ "$VERSION" == "v19" ]]; then
     TARGET_FOLDER_ID="$ID_INTEGRALIS_19"
     echo ">> Detectado: Integralis v19 (ID: $TARGET_FOLDER_ID)"
 
+# 5. CASO: POR DEFECTO (Integralis v15)
 else
     TARGET_FOLDER_ID="$ID_INTEGRALIS_15"
     echo ">> Default: Integralis v15 (ID: $TARGET_FOLDER_ID)"
 fi
+
+echo ">> Filtro de nombre final: $DB_NAME_FILTER"
 
 # --- 2. Calcular Fecha ---
 if [ "$BACKUP_DATE" == "latest" ] || [ -z "$BACKUP_DATE" ]; then
@@ -51,15 +70,12 @@ fi
 echo "--- Buscando archivo en Drive... ---"
 REMOTE_NAME="gdrive-jenkins"
 
-echo ">> Buscando patrón: *$DB_NAME_FILTER*$SEARCH_DATE*"
+echo ">> Buscando patrón: *$DB_NAME_FILTER*$SEARCH_DATE* en la ruta $RCLONE_PATH"
 
-# Buscamos filtrando por NOMBRE y FECHA
-FILE_PATH=$(rclone lsf "$REMOTE_NAME,root_folder_id=$TARGET_FOLDER_ID:respaldos" --recursive --files-only --include "*${DB_NAME_FILTER}*${SEARCH_DATE}*.dump" --include "*${DB_NAME_FILTER}*${SEARCH_DATE}*.tar.gz" | head -n 1)
+FILE_PATH=$(rclone lsf "$REMOTE_NAME,root_folder_id=$TARGET_FOLDER_ID:$RCLONE_PATH" --recursive --files-only --include "*${DB_NAME_FILTER}*${SEARCH_DATE}*.dump" --include "*${DB_NAME_FILTER}*${SEARCH_DATE}*.tar.gz" | head -n 1)
 
 if [ -z "$FILE_PATH" ]; then
     echo " ERROR: No se encontró backup para '$DB_NAME_FILTER' con fecha $SEARCH_DATE."
-    echo "   Verifica que el nombre del archivo en Drive contenga '$DB_NAME_FILTER'."
-    echo "   (Fecha calculada según hora: $(date))"
     exit 1
 fi
 
@@ -67,7 +83,7 @@ FILENAME=$(basename "$FILE_PATH")
 echo " Archivo encontrado: $FILENAME"
 
 echo "--- Descargando... ---"
-rclone copy "$REMOTE_NAME,root_folder_id=$TARGET_FOLDER_ID:respaldos/$FILE_PATH" /workspace/ -P
+rclone copy "$REMOTE_NAME,root_folder_id=$TARGET_FOLDER_ID:$RCLONE_PATH/$FILE_PATH" /workspace/ -P
 
 # --- 4. Preparar Salida ---
 if [[ "$FILENAME" == *".tar.gz" ]]; then

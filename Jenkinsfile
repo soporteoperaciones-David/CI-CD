@@ -73,7 +73,9 @@ pipeline {
                     env.LOCAL_BACKUP_FILE = readFile('filename.txt').trim()
                     env.DB_NAME_ORIGINAL = readFile('dbname.txt').trim()
                     
-                    def cleanName = env.DB_NAME_ORIGINAL.replace("-ee15", "").replace("-ee", "")
+                    def cleanName = env.DB_NAME_ORIGINAL.replace("-ee15", "").replace("-ee", "").replace(".com.ec", "")
+                                    .replace(".com", "")
+                                    .replace(".", "")
                     def dateSuffix = sh(returnStdout: true, script: 'TZ="America/Guayaquil" date +%Y%m%d').trim()
                     if (env.LOCAL_BACKUP_FILE =~ /\d{8}/) {
                         dateSuffix = (env.LOCAL_BACKUP_FILE =~ /\d{8}/)[0]
