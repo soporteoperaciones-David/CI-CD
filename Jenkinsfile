@@ -81,6 +81,7 @@ pipeline {
                     if (dateMatcher) {
                         dateSuffix = dateMatcher[0][1] 
                     }
+                    dateMatcher = null
 
                     env.TARGET_IP = (params.VERSION == 'v15') ? env.IP_TEST_V15 : env.IP_TEST_V19
                     env.DB_OWNER = (params.VERSION == 'v15') ? 'odoo15' : 'odoo19'
