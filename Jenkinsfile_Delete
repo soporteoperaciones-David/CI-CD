@@ -1,0 +1,63 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'DB_NAME_TO_DELETE', description: 'Nombre exacto de la base a borrar')
+        string(name: 'VERSION', description: 'Versión donde está la base (v15/v19)')
+    }
+
+    environment {
+        SSH_KEY_ID = 'jenkins-ssh-key'
+        IP_TEST_V15 = "148.113.165.227" 
+        IP_TEST_V19 = "158.69.210.128"
+    }
+
+    stages {
+        stage('1. Preparar Entorno') {
+            steps {
+                script {
+                    cleanWs()
+                    checkout scm
+                    
+                    env.TARGET_IP = (params.VERSION == 'v15') ? env.IP_TEST_V15 : env.IP_TEST_V19
+                    echo "Objetivo de Destrucción: ${params.DB_NAME_TO_DELETE} en servidor ${params.VERSION} (${env.TARGET_IP})"
+                }
+            }
+        }
+
+        stage('2. Ejecutar Borrado') {
+            steps {
+                script {
+                    withCredentials([
+                        sshUserPrivateKey(credentialsId: 'jenkins-ssh-key', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')
+                    ]) {
+                        sh '''
+                            set -e
+                            chmod 600 "$SSH_KEY"
+                            
+                            echo ">> Enviando script de borrado a $TARGET_IP..."
+                            scp -4 -i "$SSH_KEY" -o StrictHostKeyChecking=no scripts/delete_db.sh "ubuntu@$TARGET_IP:/tmp/"
+                            
+                            echo ">> Ejecutando orden de eliminación..."
+                            ssh -4 -i "$SSH_KEY" -o StrictHostKeyChecking=no "ubuntu@$TARGET_IP" \
+                                "chmod +x /tmp/delete_db.sh && \
+                                 /tmp/delete_db.sh '${DB_NAME_TO_DELETE}'"
+                        '''
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo "Base de datos eliminada exitosamente."
+        }
+        failure {
+            echo "Falló la eliminación. Revisar logs."
+        }
+        always {
+            cleanWs()
+        }
+    }
+}
