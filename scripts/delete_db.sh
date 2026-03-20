@@ -23,8 +23,11 @@ CMD_DROPDB="$PG_BIN/dropdb"
 
 # Verificamos si la base existe antes de intentar borrarla
 if sudo -u postgres $PG_BIN/psql -lqt | cut -d \| -f 1 | grep -qw "$DB_NAME"; then
+    echo ">> Desconectando usuarios activos a la fuerza..."
+    sudo -u postgres $PG_BIN/psql -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$DB_NAME';" > /dev/null 2>&1 || true
+
     echo ">> Borrando base de datos en Postgres..."
-    sudo -u postgres $CMD_DROPDB --if-exists --force -- "$DB_NAME"
+    sudo -u postgres $CMD_DROPDB --if-exists -- "$DB_NAME"
     echo "Base de datos $DB_NAME eliminada de Postgres."
 else
     echo "La base de datos $DB_NAME ya no existe en Postgres. Nada que borrar."
