@@ -33,6 +33,10 @@ if [[ "$ODOO_URL" == *"lns.com.ec"* ]]; then
     
     echo ">> Detectado: LNS Especial (Drive: Salesianos, Carpeta: $RCLONE_PATH)"
 
+elif [[ "$ODOO_URL" == *"cgs-co.sdb-integralis360.com"* ]]; then
+    TARGET_FOLDER_ID="$ID_SALESIANOS_15"
+    echo ">> Detectado: Salesianos (ID: $TARGET_FOLDER_ID)"
+    
 # 2. CASO: SALESIANOS ESTÁNDAR
 elif [[ "$ODOO_URL" == *".sdb-integralis360.com"* ]]; then
     TARGET_FOLDER_ID="$ID_SALESIANOS_15"
