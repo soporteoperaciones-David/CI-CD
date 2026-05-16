@@ -6,9 +6,14 @@ pipeline {
         string(name: 'VERSION', description: 'Versión Destino (v15/v19)')
         string(name: 'BACKUP_DATE', defaultValue: 'latest', description: 'Fecha YYYYMMDD o latest')
         string(name: 'EXECUTED_BY', defaultValue: 'Sistema', description: 'Usuario Odoo')
-        // OJO: Jenkins recibe esto como RECORD_ID o ODOO_ID. Asegúrate de usar el correcto.
         string(name: 'ODOO_ID', defaultValue: '0', description: 'ID del registro enviado por Odoo') 
         string(name: 'BACKUP_TYPE', defaultValue: 'dump', description: 'Formato')
+        
+        // --- NUEVOS PARÁMETROS DINÁMICOS DE RETORNO ---
+        string(name: 'ODOO_CB_URL', defaultValue: '', description: 'URL de retorno a Odoo')
+        string(name: 'ODOO_CB_DB', defaultValue: '', description: 'BD de retorno')
+        string(name: 'ODOO_CB_UID', defaultValue: '2', description: 'UID de retorno')
+        password(name: 'ODOO_CB_TOKEN', defaultValue: '', description: 'Token de retorno API')
     }
 
     environment {
@@ -128,56 +133,50 @@ pipeline {
     post {     
         success {
             script {
-                echo "Pipeline Exitoso. Ejecutando notificación..."
+                echo "Pipeline Exitoso. Ejecutando notificación a Odoo Dinámico..."
                 
-                // CAMBIO AQUÍ: Leemos ODOO_ID
                 def r_id = params.ODOO_ID ?: "0"
                 def url  = env.FINAL_URL
                 def msg  = "Restauración Exitosa.\\nBase: ${env.NEW_DB_NAME}"
                 
-                withCredentials([usernamePassword(credentialsId: 'odoo-local-api-key', 
-                                                  usernameVariable: 'USER_IGNORE', 
-                                                  passwordVariable: 'ODOO_PASS')]) {
-                    withEnv([
-                        "ODOO_URL=https://faceable-maddison-unharangued.ngrok-free.dev",
-                        "ODOO_DB=prueba"
-                    ]) {
-                        sh "chmod +x scripts/notify_odoo.sh"
-                        // Pasamos r_id al script
-                        sh "./scripts/notify_odoo.sh '${r_id}' 'done' '${url}' '${msg}'"
-                    }
+                // Inyectamos las variables dinámicas que llegaron desde Odoo
+                withEnv([
+                    "ODOO_URL=${params.ODOO_CB_URL}",
+                    "ODOO_DB=${params.ODOO_CB_DB}",
+                    "ODOO_UID=${params.ODOO_CB_UID}",
+                    "ODOO_PASS=${params.ODOO_CB_TOKEN}"
+                ]) {
+                    sh "chmod +x scripts/notify_odoo.sh"
+                    sh "./scripts/notify_odoo.sh '${r_id}' 'done' '${url}' '${msg}'"
                 }
             }
         }
         
         failure {
             script {
-                echo "Pipeline Fallido. Reportando error..."
+                echo "Pipeline Fallido. Reportando error a Odoo Dinámico..."
                 
-                // CAMBIO AQUÍ: Leemos ODOO_ID
                 def r_id = params.ODOO_ID ?: "0"
                 def msg  = "Fallo en Jenkins. Ver logs: ${env.BUILD_URL}"
 
-                withCredentials([usernamePassword(credentialsId: 'odoo-local-api-key', 
-                                                  usernameVariable: 'USER_IGNORE', 
-                                                  passwordVariable: 'ODOO_PASS')]) {
-                    withEnv([
-                        "ODOO_URL=https://faceable-maddison-unharangued.ngrok-free.dev", 
-                        "ODOO_DB=prueba"
-                    ]) {
-                         sh "chmod +x scripts/notify_odoo.sh"
-                         sh "./scripts/notify_odoo.sh '${r_id}' 'error' 'N/A' '${msg}'"
-                    }
+                // Inyectamos las variables dinámicas que llegaron desde Odoo
+                withEnv([
+                    "ODOO_URL=${params.ODOO_CB_URL}",
+                    "ODOO_DB=${params.ODOO_CB_DB}",
+                    "ODOO_UID=${params.ODOO_CB_UID}",
+                    "ODOO_PASS=${params.ODOO_CB_TOKEN}"
+                ]) {
+                     sh "chmod +x scripts/notify_odoo.sh"
+                     sh "./scripts/notify_odoo.sh '${r_id}' 'error' 'N/A' '${msg}'"
                 }
             }
         }
         cleanup {
             script {
-                echo "--- 🧹 Limpieza Final (Ahora sí) ---"
+                echo "--- 🧹 Limpieza Final ---"
                 sh "docker rm -f rclone-worker || true"
-                cleanWs() // ¡Aquí es seguro borrar!
+                cleanWs() 
             }
         }
     } 
-
-} 
+}
