@@ -46,7 +46,9 @@ EOF
 )
 
 # Ejecutar CURL
+# Ejecutar CURL
 curl -s -X POST \
      -H "Content-Type: application/json" \
+     -H "ngrok-skip-browser-warning: 1" \
      -d "$PAYLOAD" \
      "${ODOO_URL}/jsonrpc"
