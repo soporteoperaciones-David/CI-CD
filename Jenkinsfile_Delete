@@ -2,14 +2,12 @@ pipeline {
     agent any 
 
     parameters {
-        string(name: 'ODOO_URL', description: 'URL de producción')
+        // --- PARÁMETRO PRINCIPAL DE BORRADO ---
+        string(name: 'DB_NAME_TO_DELETE', defaultValue: '', description: 'Nombre exacto de la base a borrar')
         string(name: 'VERSION', description: 'Versión Destino (v15/v19)')
-        string(name: 'BACKUP_DATE', defaultValue: 'latest', description: 'Fecha YYYYMMDD o latest')
-        string(name: 'EXECUTED_BY', defaultValue: 'Sistema', description: 'Usuario Odoo')
         string(name: 'ODOO_ID', defaultValue: '0', description: 'ID del registro enviado por Odoo') 
-        string(name: 'BACKUP_TYPE', defaultValue: 'dump', description: 'Formato')
         
-        // --- NUEVOS PARÁMETROS DINÁMICOS DE RETORNO ---
+        // --- PARÁMETROS DINÁMICOS DE RETORNO ---
         string(name: 'ODOO_CB_URL', defaultValue: '', description: 'URL de retorno a Odoo')
         string(name: 'ODOO_CB_DB', defaultValue: '', description: 'BD de retorno')
         string(name: 'ODOO_CB_UID', defaultValue: '2', description: 'UID de retorno')
@@ -35,9 +33,36 @@ pipeline {
             }
         }
 
-        // ... (Aquí van tus stages 2 y 3 originales de borrado) ...
-        // Nota: En tu código original enviaste el mismo Jenkinsfile para crear y borrar. 
-        // Asegúrate de conservar aquí los stages que ejecutan scripts/delete_db.sh
+        stage('2. Borrar Base de Datos') {
+            steps {
+                script {
+                    if (!params.DB_NAME_TO_DELETE) {
+                        error("No se proporcionó el nombre de la base de datos (DB_NAME_TO_DELETE).")
+                    }
+
+                    // 1. Determinar a qué servidor conectarnos
+                    env.TARGET_IP = (params.VERSION == 'v15') ? env.IP_TEST_V15 : env.IP_TEST_V19
+                    echo "--- Iniciando borrado de ${params.DB_NAME_TO_DELETE} en ${env.TARGET_IP} ---"
+
+                    // 2. Ejecutar borrado vía SSH
+                    withCredentials([
+                        sshUserPrivateKey(credentialsId: 'jenkins-ssh-key', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')
+                    ]) {
+                        sh '''
+                            set -e
+                            chmod 600 "$SSH_KEY"
+                            
+                            # Copiamos el script de borrado al servidor destino
+                            scp -4 -i "$SSH_KEY" -o StrictHostKeyChecking=no scripts/delete_db.sh "ubuntu@$TARGET_IP:/tmp/"
+                            
+                            # Nos conectamos y ejecutamos el script pasándole el nombre de la BD
+                            ssh -4 -i "$SSH_KEY" -o StrictHostKeyChecking=no "ubuntu@$TARGET_IP" \
+                                "chmod +x /tmp/delete_db.sh && /tmp/delete_db.sh '${DB_NAME_TO_DELETE}'"
+                        '''
+                    }
+                }
+            }
+        }
     } 
     
     post {     
@@ -46,8 +71,8 @@ pipeline {
                 echo "Pipeline Exitoso. Ejecutando notificación a Odoo Dinámico..."
                 
                 def r_id = params.ODOO_ID ?: "0"
-                def url  = env.FINAL_URL ?: "N/A"
-                def msg  = "Eliminación Exitosa.\\nBase: ${env.DB_NAME_TO_DELETE ?: 'Desconocida'}"
+                def url  = "N/A"
+                def msg  = "Eliminación Exitosa.\\nBase: ${params.DB_NAME_TO_DELETE}"
                 
                 withEnv([
                     "ODOO_URL=${params.ODOO_CB_URL}",
