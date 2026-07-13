@@ -2,12 +2,10 @@ pipeline {
     agent any 
 
     parameters {
-        // --- PARÁMETRO PRINCIPAL DE BORRADO ---
+        // --- PARÁMETROS ACTIVOS (Para no romper la conexión con Odoo) ---
         string(name: 'DB_NAME_TO_DELETE', defaultValue: '', description: 'Nombre exacto de la base a borrar')
         string(name: 'VERSION', description: 'Versión Destino (v15/v19)')
         string(name: 'ODOO_ID', defaultValue: '0', description: 'ID del registro enviado por Odoo') 
-        
-        // --- PARÁMETROS DINÁMICOS DE RETORNO ---
         string(name: 'ODOO_CB_URL', defaultValue: '', description: 'URL de retorno a Odoo')
         string(name: 'ODOO_CB_DB', defaultValue: '', description: 'BD de retorno')
         string(name: 'ODOO_CB_UID', defaultValue: '2', description: 'UID de retorno')
@@ -23,6 +21,21 @@ pipeline {
     }
 
     stages {
+        // --- NUEVO STAGE VACÍO PARA QUE JENKINS NO FALLE ---
+        stage('Aviso de Desactivación') {
+            steps {
+                script {
+                    echo "⚠️ AVISO: El borrado automático de bases de datos ha sido desactivado."
+                    echo "Petición recibida para borrar: ${params.DB_NAME_TO_DELETE}"
+                    echo "No se realizará ninguna acción en el servidor."
+                }
+            }
+        }
+
+        /* ====================================================================
+           CÓDIGO ORIGINAL DESACTIVADO (COMENTADO)
+           ====================================================================
+           
         stage('1. Preparar Entorno') {
             steps {
                 script {
@@ -63,8 +76,13 @@ pipeline {
                 }
             }
         }
+        ==================================================================== */
     } 
     
+    /* ========================================================================
+       NOTIFICACIONES A ODOO DESACTIVADAS (COMENTADO)
+       ========================================================================
+       
     post {     
         success {
             script {
@@ -111,4 +129,5 @@ pipeline {
             }
         }
     } 
+    ======================================================================== */
 }
