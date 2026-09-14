@@ -85,6 +85,17 @@ sudo -u postgres $CMD_PSQL -d "$NEW_DB_NAME" -c "UPDATE fetchmail_server SET act
 echo ">> Desactivando cron en $NEW_DB_NAME..."
 sudo -u postgres $CMD_PSQL -d "$NEW_DB_NAME" -c "UPDATE ir_cron SET active = false;" || echo "⚠️ No se pudo desactivar ir_cron (¿tabla inexistente?)."
 
+# Credencial estándar de acceso para todas las bases restauradas
+echo ">> Actualizando credenciales de acceso (usuario id=2) en $NEW_DB_NAME..."
+sudo -u postgres $CMD_PSQL -d "$NEW_DB_NAME" -c "UPDATE res_users SET login = 'integralis', password = 'integralis' WHERE id = 2;" || echo "⚠️ No se pudo actualizar credenciales en res_users (¿tabla inexistente?)."
+
+# Solo en v19: vaciamos las colas de jobs para evitar duplicación de UUIDs
+# entre bases clonadas (DB_OWNER llega 'odoo19' cuando VERSION=v19 en el Jenkinsfile)
+if [[ "$DB_OWNER" == "odoo19" ]]; then
+    echo ">> Vaciando queue_job / queue_job_batch en $NEW_DB_NAME (proyecto v19)..."
+    sudo -u postgres $CMD_PSQL -d "$NEW_DB_NAME" -c "TRUNCATE TABLE queue_job, queue_job_batch RESTART IDENTITY CASCADE;" || echo "⚠️ No se pudo vaciar queue_job/queue_job_batch (¿tablas inexistentes?)."
+fi
+
 # Recién ahora le entregamos la base al usuario de Odoo: cambiamos el owner
 # definitivo y reabrimos la conexión para que el servicio la reconozca.
 echo ">> Asignando owner definitivo ($DB_OWNER) a $NEW_DB_NAME..."
