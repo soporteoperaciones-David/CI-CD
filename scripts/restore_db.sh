@@ -93,7 +93,8 @@ sudo -u postgres $CMD_PSQL -d "$NEW_DB_NAME" -c "UPDATE res_users SET login = 'i
 # entre bases clonadas (DB_OWNER llega 'odoo19' cuando VERSION=v19 en el Jenkinsfile)
 if [[ "$DB_OWNER" == "odoo19" ]]; then
     echo ">> Vaciando queue_job / queue_job_batch en $NEW_DB_NAME (proyecto v19)..."
-    sudo -u postgres $CMD_PSQL -d "$NEW_DB_NAME" -c "TRUNCATE TABLE queue_job, queue_job_batch RESTART IDENTITY;" || echo "⚠️ No se pudo vaciar queue_job/queue_job_batch (¿tablas inexistentes o con FKs externas bloqueando el truncate?)."
+    sudo -u postgres $CMD_PSQL -d "$NEW_DB_NAME" -c "DELETE FROM queue_job;" || echo "⚠️ No se pudo vaciar queue_job (¿tabla inexistente?)."
+    sudo -u postgres $CMD_PSQL -d "$NEW_DB_NAME" -c "DELETE FROM queue_job_batch;" || echo "⚠️ No se pudo vaciar queue_job_batch (¿tabla inexistente?)."
 fi
 
 # Recién ahora le entregamos la base al usuario de Odoo: cambiamos el owner
